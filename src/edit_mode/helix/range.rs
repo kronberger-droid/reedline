@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::core_editor::{is_grapheme_boundary, prev_grapheme_boundary};
+
 /// The direction a range extends in.
 ///
 /// `Forward` when `head >= anchor`, `Backward` when `head < anchor`.
@@ -30,6 +32,16 @@ impl HelixRange {
     /// A zero-width range at `head`.
     pub(super) fn point(head: usize) -> Self {
         Self::new(head, head)
+    }
+
+    /// The anchor — the side that doesn't move when extending.
+    pub(super) fn anchor(&self) -> usize {
+        self.anchor
+    }
+
+    /// The head — the side that moves when extending.
+    pub(super) fn head(&self) -> usize {
+        self.head
     }
 
     /// Start of the range
@@ -101,6 +113,33 @@ impl HelixRange {
     /// `true` if `pos` lies inside the range (left-inclusive, right-exclusive).
     pub(super) fn contains(&self, pos: usize) -> bool {
         self.start() <= pos && pos < self.end()
+    }
+
+    /// Byte index of the grapheme the visible block cursor sits on.
+    ///
+    /// In Helix's gap-indexing model, `anchor` and `head` are positions
+    /// *between* bytes, but the block cursor is rendered *on* a grapheme. For a
+    /// `Forward` non-empty range the head is the gap *after* the cursor's
+    /// grapheme; for `Backward` and empty ranges the head is the gap *before*
+    /// (or at) the cursor's grapheme.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `head` is not on a UTF-8 character boundary in `buf`.
+    pub(super) fn cursor(&self, buf: &str) -> usize {
+        match (self.is_empty(), self.direction()) {
+            (false, Direction::Forward) => prev_grapheme_boundary(buf, self.head),
+            _ => self.head,
+        }
+    }
+
+    /// `true` when both `anchor` and `head` lie on grapheme boundaries in `buf`.
+    ///
+    /// Defensive check for use after operations that could land mid-grapheme
+    /// (e.g. byte-arithmetic constructors). Always `true` for ranges produced
+    /// by the grapheme-aware movement helpers.
+    pub(super) fn is_aligned(&self, buf: &str) -> bool {
+        is_grapheme_boundary(buf, self.anchor) && is_grapheme_boundary(buf, self.head)
     }
 }
 
@@ -330,5 +369,104 @@ mod tests {
                 "mismatch at {pos}"
             );
         }
+    }
+
+    // --- cursor() ------------------------------------------------------------
+
+    #[test]
+    fn cursor_empty_range_at_zero() {
+        assert_eq!(HelixRange::point(0).cursor("abc"), 0);
+    }
+
+    #[test]
+    fn cursor_empty_range_mid_buffer() {
+        assert_eq!(HelixRange::point(2).cursor("abc"), 2);
+    }
+
+    #[test]
+    fn cursor_empty_range_at_end_of_buffer() {
+        // Helix renders the cursor on the trailing one-cell space past the
+        // last grapheme; cursor() returns buf.len() to match.
+        assert_eq!(HelixRange::point(3).cursor("abc"), 3);
+    }
+
+    #[test]
+    fn cursor_forward_ascii_steps_back_one() {
+        // Forward range covering "a": head=1 is the gap after 'a',
+        // cursor renders on 'a' at byte 0.
+        assert_eq!(HelixRange::new(0, 1).cursor("abc"), 0);
+    }
+
+    #[test]
+    fn cursor_forward_at_end_lands_on_last_grapheme() {
+        // Forward range covering "abc": head=3 is buf.len(),
+        // cursor renders on 'c' at byte 2.
+        assert_eq!(HelixRange::new(0, 3).cursor("abc"), 2);
+    }
+
+    #[test]
+    fn cursor_forward_over_multi_byte_grapheme() {
+        // "café" — 'é' occupies bytes 3..5. Forward range covering all four
+        // graphemes: head=5, cursor on 'é' at byte 3.
+        assert_eq!(HelixRange::new(0, 5).cursor("café"), 3);
+    }
+
+    #[test]
+    fn cursor_backward_returns_head_directly() {
+        // Backward range over "bc": anchor=3, head=1.
+        // cursor renders on 'b' at byte 1 = head.
+        assert_eq!(HelixRange::new(3, 1).cursor("abc"), 1);
+    }
+
+    #[test]
+    fn cursor_forward_over_zwj_emoji_sequence() {
+        // Family ZWJ emoji is 18 bytes, treated as one grapheme.
+        // Forward range covering it: head=18, cursor on the family at byte 0.
+        assert_eq!(HelixRange::new(0, 18).cursor("👨‍👩‍👧!"), 0);
+    }
+
+    // --- is_aligned() --------------------------------------------------------
+
+    #[test]
+    fn is_aligned_ascii_boundaries_true() {
+        assert!(HelixRange::new(0, 3).is_aligned("abc"));
+    }
+
+    #[test]
+    fn is_aligned_at_zero_always_true() {
+        assert!(HelixRange::point(0).is_aligned("abc"));
+        assert!(HelixRange::point(0).is_aligned(""));
+    }
+
+    #[test]
+    fn is_aligned_at_buf_len_always_true() {
+        assert!(HelixRange::point(3).is_aligned("abc"));
+    }
+
+    #[test]
+    fn is_aligned_mid_utf8_char_false() {
+        // Byte 4 of "café" lies inside the 'é' codepoint — not even a UTF-8
+        // char boundary, let alone a grapheme boundary.
+        assert!(!HelixRange::point(4).is_aligned("café"));
+    }
+
+    #[test]
+    fn is_aligned_mid_combining_mark_false() {
+        // "e\u{0301}" — byte 1 is between base 'e' and the combining acute,
+        // a UTF-8 char boundary but NOT a grapheme boundary.
+        assert!(!HelixRange::point(1).is_aligned("e\u{0301}"));
+    }
+
+    #[test]
+    fn is_aligned_out_of_bounds_false() {
+        assert!(!HelixRange::point(10).is_aligned("abc"));
+    }
+
+    #[test]
+    fn is_aligned_checks_both_anchor_and_head() {
+        // anchor aligned, head not.
+        assert!(!HelixRange::new(0, 1).is_aligned("e\u{0301}"));
+        // head aligned, anchor not.
+        assert!(!HelixRange::new(1, 0).is_aligned("e\u{0301}"));
     }
 }

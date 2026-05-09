@@ -1,3 +1,5 @@
+#[cfg(feature = "helix")]
+use unicode_segmentation::GraphemeCursor;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Byte index of the next grapheme boundary at or after `pos`.
@@ -28,6 +30,21 @@ pub fn prev_grapheme_boundary(buf: &str, pos: usize) -> usize {
         .next_back()
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// `true` when `pos` falls on a grapheme boundary in `buf`.
+///
+/// Unlike [`next_grapheme_boundary`] and [`prev_grapheme_boundary`], this is
+/// defensive: it does not panic on positions that lie inside a multi-byte
+/// codepoint or past `buf.len()`, and returns `false` for those.
+#[cfg(feature = "helix")]
+pub fn is_grapheme_boundary(buf: &str, pos: usize) -> bool {
+    if pos > buf.len() || !buf.is_char_boundary(pos) {
+        return false;
+    }
+    GraphemeCursor::new(pos, buf.len(), true)
+        .is_boundary(buf, 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -136,6 +153,58 @@ mod tests {
                 pos,
                 "round-trip failed at pos {pos}"
             );
+        }
+    }
+
+    // --- is_grapheme_boundary -----------------------------------------------
+
+    #[cfg(feature = "helix")]
+    mod is_grapheme_boundary {
+        use super::*;
+
+        #[test]
+        fn true_at_zero() {
+            assert!(is_grapheme_boundary("abc", 0));
+            assert!(is_grapheme_boundary("", 0));
+        }
+
+        #[test]
+        fn true_at_buf_len() {
+            assert!(is_grapheme_boundary("abc", 3));
+        }
+
+        #[test]
+        fn true_at_ascii_positions() {
+            for pos in 0..=3 {
+                assert!(is_grapheme_boundary("abc", pos), "pos {pos}");
+            }
+        }
+
+        #[test]
+        fn false_past_buf_len() {
+            assert!(!is_grapheme_boundary("abc", 4));
+        }
+
+        #[test]
+        fn false_inside_multi_byte_codepoint() {
+            // Byte 4 of "café" lies inside the 'é' codepoint — not a UTF-8 boundary.
+            assert!(!is_grapheme_boundary("café", 4));
+        }
+
+        #[test]
+        fn false_between_base_and_combining_mark() {
+            // "e\u{0301}" — byte 1 is a UTF-8 char boundary but the combining
+            // acute is part of the same grapheme, so byte 1 is not a grapheme boundary.
+            assert!(!is_grapheme_boundary("e\u{0301}", 1));
+        }
+
+        #[test]
+        fn true_at_every_grapheme_index() {
+            let buf = "a日e\u{0301}👨‍👩‍👧";
+            for (pos, _) in buf.grapheme_indices(true) {
+                assert!(is_grapheme_boundary(buf, pos), "pos {pos}");
+            }
+            assert!(is_grapheme_boundary(buf, buf.len()));
         }
     }
 }

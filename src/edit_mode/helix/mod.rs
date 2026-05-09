@@ -3,6 +3,7 @@ mod bindings;
 mod event;
 mod key;
 mod mode;
+mod movement;
 mod range;
 
 use crate::{

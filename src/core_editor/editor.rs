@@ -235,12 +235,21 @@ impl Editor {
         self.selection_mode = None;
     }
 
+    /// Record the active edit mode on the selection if `select` is about to
+    /// plant a fresh anchor. No-op when an anchor already exists or when
+    /// `select` is false.
+    fn note_selection_mode_if_planting(&mut self, select: bool) {
+        if select && self.line_buffer.selection_anchor().is_none() {
+            self.selection_mode = Some(self.edit_mode.clone());
+        }
+    }
+
     fn update_selection_anchor(&mut self, select: bool) {
+        self.note_selection_mode_if_planting(select);
         if select {
             if self.line_buffer.selection_anchor().is_none() {
-                let head = self.insertion_point();
-                self.line_buffer.set_selection_anchor(Some(head));
-                self.selection_mode = Some(self.edit_mode.clone());
+                self.line_buffer
+                    .set_selection_anchor(Some(self.insertion_point()));
             }
         } else {
             self.clear_selection();
@@ -251,9 +260,10 @@ impl Editor {
     pub fn set_edit_mode(&mut self, mode: PromptEditMode) {
         self.edit_mode = mode;
     }
+
     fn move_to_position(&mut self, position: usize, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.set_insertion_point(position)
+        self.note_selection_mode_if_planting(select);
+        self.line_buffer.move_head(position, select);
     }
 
     pub(crate) fn move_line_up(&mut self, select: bool) {

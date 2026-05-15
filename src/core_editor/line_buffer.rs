@@ -118,6 +118,23 @@ impl LineBuffer {
         self.selection_anchor = None;
     }
 
+    /// Moves the cursor head to `pos`. If `select` is true, preserves any
+    /// existing selection anchor (or plants one at the current head if none
+    /// exists). If `select` is false, clears the selection.
+    ///
+    /// ## Unicode safety:
+    /// Not checked, improper use may cause panics in following operations
+    pub fn move_head(&mut self, pos: usize, select: bool) {
+        if select {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.insertion_point);
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        self.insertion_point = pos;
+    }
+
     /// Output the current line in the multiline buffer
     pub fn get_buffer(&self) -> &str {
         &self.lines

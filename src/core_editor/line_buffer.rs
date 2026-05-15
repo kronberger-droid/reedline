@@ -1,5 +1,8 @@
 use {
-    crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
+    crate::core_editor::{
+        cursor::Cursor,
+        graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
+    },
     itertools::Itertools,
     std::{convert::From, ops::Range},
     unicode_segmentation::UnicodeSegmentation,
@@ -10,6 +13,7 @@ use {
 pub struct LineBuffer {
     lines: String,
     insertion_point: usize,
+    selection_anchor: Option<usize>,
 }
 
 impl From<&str> for LineBuffer {
@@ -61,16 +65,57 @@ impl LineBuffer {
         );
     }
 
-    /// Gets the current edit position
+    /// Gets the current edit position (head of the cursor).
     pub fn insertion_point(&self) -> usize {
         self.insertion_point
     }
 
-    /// Sets the current edit position
+    /// Sets the current edit position. Does not touch the selection anchor —
+    /// use [`clear_selection`](Self::clear_selection) explicitly when needed.
+    ///
     /// ## Unicode safety:
     /// Not checked, improper use may cause panics in following operations
     pub fn set_insertion_point(&mut self, offset: usize) {
         self.insertion_point = offset;
+    }
+
+    /// Returns the cursor as a [`Cursor`] (anchor + head), reflecting any
+    /// active selection.
+    pub fn cursor(&self) -> Cursor {
+        match self.selection_anchor {
+            Some(anchor) => Cursor::new(anchor, self.insertion_point),
+            None => Cursor::point(self.insertion_point),
+        }
+    }
+
+    /// Sets the cursor to the given [`Cursor`]. An empty cursor (anchor == head)
+    /// clears any selection; a non-empty cursor sets both anchor and head.
+    ///
+    /// ## Unicode safety:
+    /// Not checked, improper use may cause panics in following operations
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        self.insertion_point = cursor.head();
+        self.selection_anchor = if cursor.is_empty() {
+            None
+        } else {
+            Some(cursor.anchor())
+        };
+    }
+
+    /// The current selection anchor, if any. `Some(pos)` while a selection is
+    /// active; `None` otherwise.
+    pub fn selection_anchor(&self) -> Option<usize> {
+        self.selection_anchor
+    }
+
+    /// Sets the selection anchor without moving the cursor head.
+    pub fn set_selection_anchor(&mut self, anchor: Option<usize>) {
+        self.selection_anchor = anchor;
+    }
+
+    /// Clears any active selection. The cursor head is unchanged.
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = None;
     }
 
     /// Output the current line in the multiline buffer

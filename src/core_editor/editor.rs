@@ -18,7 +18,6 @@ pub struct Editor {
     system_clipboard: Box<dyn Clipboard>,
     edit_stack: EditStack<LineBuffer>,
     last_undo_behavior: UndoBehavior,
-    selection_anchor: Option<usize>,
     selection_mode: Option<PromptEditMode>,
     edit_mode: PromptEditMode,
 }
@@ -32,7 +31,6 @@ impl Default for Editor {
             system_clipboard: get_system_clipboard(),
             edit_stack: EditStack::new(),
             last_undo_behavior: UndoBehavior::CreateUndoPoint,
-            selection_anchor: None,
             selection_mode: None,
             edit_mode: PromptEditMode::Default,
         }
@@ -225,21 +223,23 @@ impl Editor {
     }
 
     fn swap_cursor_and_anchor(&mut self) {
-        if let Some(anchor) = self.selection_anchor {
-            self.selection_anchor = Some(self.insertion_point());
+        if let Some(anchor) = self.line_buffer.selection_anchor() {
+            let head = self.insertion_point();
+            self.line_buffer.set_selection_anchor(Some(head));
             self.line_buffer.set_insertion_point(anchor);
         }
     }
 
     pub(crate) fn clear_selection(&mut self) {
-        self.selection_anchor = None;
+        self.line_buffer.clear_selection();
         self.selection_mode = None;
     }
 
     fn update_selection_anchor(&mut self, select: bool) {
         if select {
-            if self.selection_anchor.is_none() {
-                self.selection_anchor = Some(self.insertion_point());
+            if self.line_buffer.selection_anchor().is_none() {
+                let head = self.insertion_point();
+                self.line_buffer.set_selection_anchor(Some(head));
                 self.selection_mode = Some(self.edit_mode.clone());
             }
         } else {
@@ -554,7 +554,7 @@ impl Editor {
     }
 
     fn cut_char(&mut self) {
-        if self.selection_anchor.is_some() {
+        if self.line_buffer.selection_anchor().is_some() {
             self.cut_selection_to_cut_buffer();
         } else {
             let insertion_offset = self.line_buffer.insertion_point();
@@ -685,7 +685,7 @@ impl Editor {
     }
 
     fn select_all(&mut self) {
-        self.selection_anchor = Some(0);
+        self.line_buffer.set_selection_anchor(Some(0));
         self.line_buffer.move_to_end();
     }
 
@@ -724,7 +724,7 @@ impl Editor {
     /// If a selection is active returns the selected range, otherwise None.
     /// The range is guaranteed to be ascending.
     pub fn get_selection(&self) -> Option<(usize, usize)> {
-        let selection_anchor = self.selection_anchor?;
+        let selection_anchor = self.line_buffer.selection_anchor()?;
 
         // Use the mode that was active when the selection was created, not the current mode
         let inclusive = matches!(
@@ -767,7 +767,7 @@ impl Editor {
     }
 
     fn backspace(&mut self) {
-        if self.selection_anchor.is_some() {
+        if self.line_buffer.selection_anchor().is_some() {
             self.delete_selection();
         } else {
             self.line_buffer.delete_left_grapheme();
@@ -775,7 +775,7 @@ impl Editor {
     }
 
     fn delete(&mut self) {
-        if self.selection_anchor.is_some() {
+        if self.line_buffer.selection_anchor().is_some() {
             self.delete_selection();
         } else {
             self.line_buffer.delete_right_grapheme();
@@ -1414,17 +1414,17 @@ mod test {
         for _ in 0..3 {
             editor.run_edit_command(&EditCommand::MoveRight { select: true });
         }
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.line_buffer().selection_anchor(), Some(0));
         assert_eq!(editor.insertion_point(), 3);
         assert_eq!(editor.get_selection(), Some((0, 3)));
 
         editor.run_edit_command(&EditCommand::SwapCursorAndAnchor);
-        assert_eq!(editor.selection_anchor, Some(3));
+        assert_eq!(editor.line_buffer().selection_anchor(), Some(3));
         assert_eq!(editor.insertion_point(), 0);
         assert_eq!(editor.get_selection(), Some((0, 3)));
 
         editor.run_edit_command(&EditCommand::SwapCursorAndAnchor);
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.line_buffer().selection_anchor(), Some(0));
         assert_eq!(editor.insertion_point(), 3);
         assert_eq!(editor.get_selection(), Some((0, 3)));
     }
@@ -1439,7 +1439,7 @@ mod test {
         for _ in 0..3 {
             editor.run_edit_command(&EditCommand::MoveRight { select: true });
         }
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.line_buffer().selection_anchor(), Some(0));
         assert_eq!(editor.insertion_point(), 3);
         // In Vi normal mode, selection should be inclusive (include character at position 3)
         assert_eq!(editor.get_selection(), Some((0, 4)));
@@ -1455,7 +1455,7 @@ mod test {
         for _ in 0..3 {
             editor.run_edit_command(&EditCommand::MoveLeft { select: true });
         }
-        assert_eq!(editor.selection_anchor, Some(4));
+        assert_eq!(editor.line_buffer().selection_anchor(), Some(4));
         assert_eq!(editor.insertion_point(), 1); // cursor at position 1 ('h')
                                                  // In Vi normal mode, selection should be inclusive from cursor to anchor+1
                                                  // So it should select from position 1 to 5 (inclusive of char at position 4)
@@ -1543,7 +1543,9 @@ mod test {
         #[test]
         fn test_cut_selection_system() {
             let mut editor = editor_with("This is a test!");
-            editor.selection_anchor = Some(editor.line_buffer.len());
+            editor
+                .line_buffer
+                .set_selection_anchor(Some(editor.line_buffer.len()));
             editor.line_buffer.set_insertion_point(0);
             editor.run_edit_command(&EditCommand::CutSelectionSystem);
             assert!(editor.line_buffer.get_buffer().is_empty());
@@ -1552,7 +1554,9 @@ mod test {
         fn test_copypaste_selection_system() {
             let s = "This is a test!";
             let mut editor = editor_with(s);
-            editor.selection_anchor = Some(editor.line_buffer.len());
+            editor
+                .line_buffer
+                .set_selection_anchor(Some(editor.line_buffer.len()));
             editor.line_buffer.set_insertion_point(0);
             editor.run_edit_command(&EditCommand::CopySelectionSystem);
             editor.run_edit_command(&EditCommand::PasteSystem);
@@ -1754,7 +1758,7 @@ mod test {
         }
 
         assert_eq!(editor.insertion_point(), 4);
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.line_buffer().selection_anchor(), Some(0));
         assert_eq!(editor.get_selection(), Some((0, 5))); // inclusive selection
 
         editor.run_edit_command(&EditCommand::CutSelection);

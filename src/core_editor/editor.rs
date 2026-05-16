@@ -371,28 +371,23 @@ impl Editor {
     }
 
     pub(crate) fn move_to_start(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_to_start();
+        self.move_to_position(0, select);
     }
 
     pub(crate) fn move_to_end(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_to_end();
+        self.move_to_position(self.line_buffer.len(), select);
     }
 
     pub(crate) fn move_to_line_start(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_to_line_start();
+        self.move_to_position(self.line_buffer.line_start_index(), select);
     }
 
     pub(crate) fn move_to_line_non_blank_start(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_to_line_non_blank_start();
+        self.move_to_position(self.line_buffer.line_non_blank_start_index(), select);
     }
 
     pub(crate) fn move_to_line_end(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_to_line_end();
+        self.move_to_position(self.line_buffer.find_current_line_end(), select);
     }
 
     fn undo(&mut self) {
@@ -685,13 +680,11 @@ impl Editor {
     }
 
     fn move_left(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_left();
+        self.move_to_position(self.line_buffer.grapheme_left_index(), select);
     }
 
     fn move_right(&mut self, select: bool) {
-        self.update_selection_anchor(select);
-        self.line_buffer.move_right();
+        self.move_to_position(self.line_buffer.grapheme_right_index(), select);
     }
 
     fn select_all(&mut self) {

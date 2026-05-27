@@ -328,12 +328,16 @@ impl Reedline {
         self
     }
 
-    /// Toggle whether reedline uses the kitty keyboard enhancement protocol
+    /// Override whether reedline uses the kitty keyboard enhancement protocol
     ///
-    /// This allows us to disambiguate more events than the traditional standard
+    /// By default reedline enables the protocol automatically on terminals that
+    /// support it. Call this to force it on or off regardless of that default.
+    /// Passing `true` is still a no-op on terminals that don't support it.
+    ///
+    /// This allows us to disambiguate more events than the traditional standard.
     /// Only available with a few terminal emulators.
-    /// You can check for that with [`crate::kitty_protocol_available`]
-    /// `Reedline` will perform this check internally
+    /// You can check for that with [`crate::kitty_protocol_available`];
+    /// `Reedline` will perform this check internally.
     ///
     /// Read more: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
     pub fn use_kitty_keyboard_enhancement(mut self, enable: bool) -> Self {

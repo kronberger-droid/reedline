@@ -1,3 +1,5 @@
+use super::buffer::Buffer;
+use super::selection::{Boundary, SetSelection};
 use super::{edit_stack::EditStack, Clipboard, ClipboardMode, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
@@ -12,13 +14,12 @@ use std::ops::{DerefMut, Range};
 /// In comparison to the state-less [`LineBuffer`] the [`Editor`] keeps track of
 /// the undo/redo history and has facilities for cut/copy/yank/paste
 pub struct Editor {
-    line_buffer: LineBuffer,
+    buffer: Buffer,
     cut_buffer: Box<dyn Clipboard>,
     #[cfg(feature = "system_clipboard")]
     system_clipboard: Box<dyn Clipboard>,
     edit_stack: EditStack<LineBuffer>,
     last_undo_behavior: UndoBehavior,
-    selection_anchor: Option<usize>,
     selection_mode: Option<PromptEditMode>,
     edit_mode: PromptEditMode,
 }
@@ -26,13 +27,12 @@ pub struct Editor {
 impl Default for Editor {
     fn default() -> Self {
         Editor {
-            line_buffer: LineBuffer::new(),
+            buffer: Buffer::new(),
             cut_buffer: get_local_clipboard(),
             #[cfg(feature = "system_clipboard")]
             system_clipboard: get_system_clipboard(),
             edit_stack: EditStack::new(),
             last_undo_behavior: UndoBehavior::CreateUndoPoint,
-            selection_anchor: None,
             selection_mode: None,
             edit_mode: PromptEditMode::Default,
         }
@@ -42,13 +42,13 @@ impl Default for Editor {
 impl Editor {
     /// Get the current [`LineBuffer`]
     pub const fn line_buffer(&self) -> &LineBuffer {
-        &self.line_buffer
+        &self.buffer.line_buffer
     }
 
     /// Set the current [`LineBuffer`].
     /// [`UndoBehavior`] specifies how this change should be reflected on the undo stack.
     pub(crate) fn set_line_buffer(&mut self, line_buffer: LineBuffer, undo_behavior: UndoBehavior) {
-        self.line_buffer = line_buffer;
+        self.buffer.line_buffer = line_buffer;
         self.update_undo_state(undo_behavior);
     }
 
@@ -88,10 +88,10 @@ impl Editor {
             EditCommand::Backspace => self.backspace(),
             EditCommand::Delete => self.delete(),
             EditCommand::CutChar => self.cut_char(),
-            EditCommand::BackspaceWord => self.line_buffer.delete_word_left(),
-            EditCommand::DeleteWord => self.line_buffer.delete_word_right(),
-            EditCommand::Clear => self.line_buffer.clear(),
-            EditCommand::ClearToLineEnd => self.line_buffer.clear_to_line_end(),
+            EditCommand::BackspaceWord => self.buffer.line_buffer.delete_word_left(),
+            EditCommand::DeleteWord => self.buffer.line_buffer.delete_word_right(),
+            EditCommand::Clear => self.buffer.line_buffer.clear(),
+            EditCommand::ClearToLineEnd => self.buffer.line_buffer.clear_to_line_end(),
             EditCommand::CutCurrentLine => self.cut_current_line(),
             EditCommand::CutFromStart => self.cut_from_start(),
             EditCommand::CutFromStartLinewise { leave_blank_line } => {
@@ -113,12 +113,12 @@ impl Editor {
             EditCommand::CutBigWordRightToNext => self.cut_big_word_right_to_next(),
             EditCommand::PasteCutBufferBefore => self.insert_cut_buffer_before(),
             EditCommand::PasteCutBufferAfter => self.insert_cut_buffer_after(),
-            EditCommand::UppercaseWord => self.line_buffer.uppercase_word(),
-            EditCommand::LowercaseWord => self.line_buffer.lowercase_word(),
-            EditCommand::SwitchcaseChar => self.line_buffer.switchcase_char(),
-            EditCommand::CapitalizeChar => self.line_buffer.capitalize_char(),
-            EditCommand::SwapWords => self.line_buffer.swap_words(),
-            EditCommand::SwapGraphemes => self.line_buffer.swap_graphemes(),
+            EditCommand::UppercaseWord => self.buffer.line_buffer.uppercase_word(),
+            EditCommand::LowercaseWord => self.buffer.line_buffer.lowercase_word(),
+            EditCommand::SwitchcaseChar => self.buffer.line_buffer.switchcase_char(),
+            EditCommand::CapitalizeChar => self.buffer.line_buffer.capitalize_char(),
+            EditCommand::SwapWords => self.buffer.line_buffer.swap_words(),
+            EditCommand::SwapGraphemes => self.buffer.line_buffer.swap_graphemes(),
             EditCommand::Undo => self.undo(),
             EditCommand::Redo => self.redo(),
             EditCommand::CutRightUntil(c) => self.cut_right_until_char(*c, false, true),
@@ -159,30 +159,30 @@ impl Editor {
             EditCommand::CopyLeftUntil(c) => self.copy_left_until_char(*c, false, true),
             EditCommand::CopyLeftBefore(c) => self.copy_left_until_char(*c, true, true),
             EditCommand::CopyCurrentLine => {
-                let range = self.line_buffer.current_line_range();
-                let copy_slice = &self.line_buffer.get_buffer()[range];
+                let range = self.buffer.line_buffer.current_line_range();
+                let copy_slice = &self.buffer.line_buffer.get_buffer()[range];
                 if !copy_slice.is_empty() {
                     self.cut_buffer.set(copy_slice, ClipboardMode::Lines);
                 }
             }
             EditCommand::CopyLeft => {
-                let insertion_offset = self.line_buffer.insertion_point();
+                let insertion_offset = self.buffer.line_buffer.insertion_point();
                 if insertion_offset > 0 {
-                    let left_index = self.line_buffer.grapheme_left_index();
+                    let left_index = self.buffer.line_buffer.grapheme_left_index();
                     let copy_range = left_index..insertion_offset;
                     self.cut_buffer.set(
-                        &self.line_buffer.get_buffer()[copy_range],
+                        &self.buffer.line_buffer.get_buffer()[copy_range],
                         ClipboardMode::Normal,
                     );
                 }
             }
             EditCommand::CopyRight => {
-                let insertion_offset = self.line_buffer.insertion_point();
-                let right_index = self.line_buffer.grapheme_right_index();
+                let insertion_offset = self.buffer.line_buffer.insertion_point();
+                let right_index = self.buffer.line_buffer.grapheme_right_index();
                 if right_index > insertion_offset {
                     let copy_range = insertion_offset..right_index;
                     self.cut_buffer.set(
-                        &self.line_buffer.get_buffer()[copy_range],
+                        &self.buffer.line_buffer.get_buffer()[copy_range],
                         ClipboardMode::Normal,
                     );
                 }
@@ -225,26 +225,53 @@ impl Editor {
     }
 
     fn swap_cursor_and_anchor(&mut self) {
-        if let Some(anchor) = self.selection_anchor {
-            self.selection_anchor = Some(self.insertion_point());
-            self.line_buffer.set_insertion_point(anchor);
+        if let Some(anchor) = self.buffer.anchor() {
+            self.buffer.set_anchor(Some(self.insertion_point()));
+            self.buffer.line_buffer.set_insertion_point(anchor);
         }
     }
 
     pub(crate) fn clear_selection(&mut self) {
-        self.selection_anchor = None;
+        self.buffer.set_anchor(None);
         self.selection_mode = None;
     }
 
     fn update_selection_anchor(&mut self, select: bool) {
         if select {
-            if self.selection_anchor.is_none() {
-                self.selection_anchor = Some(self.insertion_point());
+            if self.buffer.anchor().is_none() {
+                self.buffer.set_anchor(Some(self.insertion_point()));
                 self.selection_mode = Some(self.edit_mode.clone());
             }
         } else {
             self.clear_selection();
         }
+    }
+
+    /// Resolve a [`Boundary`] to a byte offset relative to `pos`.
+    fn locate(&self, boundary: Boundary, pos: usize) -> usize {
+        match boundary {
+            Boundary::Offset(n) => n.min(self.buffer.line_buffer.len()),
+            Boundary::GraphemeRight => {
+                self.buffer.line_buffer.grapheme_right_index_from_pos(pos)
+            }
+            Boundary::GraphemeLeft => {
+                self.buffer.line_buffer.grapheme_left_index_from_pos(pos)
+            }
+            Boundary::WordRight => {
+                self.buffer.line_buffer.word_right_index_from_pos(pos)
+            }
+        }
+    }
+
+    /// Resolve and apply a [`SetSelection`] to the current selection.
+    ///
+    /// Boundaries resolve relative to the current head; both endpoints then
+    /// commit from the pre-transform snapshot (see [`Selection::transform`]).
+    pub(super) fn set_selection(&mut self, op: SetSelection<Boundary>) {
+        let head = self.insertion_point();
+        let resolved = op.resolve(|b| self.locate(b, head));
+        let next = self.buffer.selection().transform(resolved);
+        self.buffer.set_selection(next);
     }
 
     /// Set the current edit mode
@@ -253,24 +280,24 @@ impl Editor {
     }
     fn move_to_position(&mut self, position: usize, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.set_insertion_point(position)
+        self.buffer.line_buffer.set_insertion_point(position)
     }
 
     pub(crate) fn move_line_up(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_line_up();
+        self.buffer.line_buffer.move_line_up();
         self.update_undo_state(UndoBehavior::MoveCursor);
     }
 
     pub(crate) fn move_line_down(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_line_down();
+        self.buffer.line_buffer.move_line_down();
         self.update_undo_state(UndoBehavior::MoveCursor);
     }
 
     /// Get the text of the current [`LineBuffer`]
     pub fn get_buffer(&self) -> &str {
-        self.line_buffer.get_buffer()
+        self.buffer.line_buffer.get_buffer()
     }
 
     /// Edit the [`LineBuffer`] in an undo-safe manner.
@@ -279,34 +306,34 @@ impl Editor {
         F: FnOnce(&mut LineBuffer),
     {
         self.update_undo_state(undo_behavior);
-        func(&mut self.line_buffer);
+        func(&mut self.buffer.line_buffer);
     }
 
     /// Set the text of the current [`LineBuffer`] given the specified [`UndoBehavior`]
     /// Insertion point update to the end of the buffer.
     pub(crate) fn set_buffer(&mut self, buffer: String, undo_behavior: UndoBehavior) {
-        self.line_buffer.set_buffer(buffer);
+        self.buffer.line_buffer.set_buffer(buffer);
         self.update_undo_state(undo_behavior);
     }
 
     pub(crate) fn insertion_point(&self) -> usize {
-        self.line_buffer.insertion_point()
+        self.buffer.line_buffer.insertion_point()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.line_buffer.is_empty()
+        self.buffer.line_buffer.is_empty()
     }
 
     pub(crate) fn is_cursor_at_first_line(&self) -> bool {
-        self.line_buffer.is_cursor_at_first_line()
+        self.buffer.line_buffer.is_cursor_at_first_line()
     }
 
     pub(crate) fn is_cursor_at_last_line(&self) -> bool {
-        self.line_buffer.is_cursor_at_last_line()
+        self.buffer.line_buffer.is_cursor_at_last_line()
     }
 
     pub(crate) fn is_cursor_at_buffer_end(&self) -> bool {
-        self.line_buffer.insertion_point() == self.get_buffer().len()
+        self.buffer.line_buffer.insertion_point() == self.get_buffer().len()
     }
 
     pub(crate) fn reset_undo_stack(&mut self) {
@@ -315,37 +342,37 @@ impl Editor {
 
     pub(crate) fn move_to_start(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_to_start();
+        self.buffer.line_buffer.move_to_start();
     }
 
     pub(crate) fn move_to_end(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_to_end();
+        self.buffer.line_buffer.move_to_end();
     }
 
     pub(crate) fn move_to_line_start(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_to_line_start();
+        self.buffer.line_buffer.move_to_line_start();
     }
 
     pub(crate) fn move_to_line_non_blank_start(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_to_line_non_blank_start();
+        self.buffer.line_buffer.move_to_line_non_blank_start();
     }
 
     pub(crate) fn move_to_line_end(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_to_line_end();
+        self.buffer.line_buffer.move_to_line_end();
     }
 
     fn undo(&mut self) {
         let val = self.edit_stack.undo();
-        self.line_buffer = val.clone();
+        self.buffer.line_buffer = val.clone();
     }
 
     fn redo(&mut self) {
         let val = self.edit_stack.redo();
-        self.line_buffer = val.clone();
+        self.buffer.line_buffer = val.clone();
     }
 
     pub(crate) fn update_undo_state(&mut self, undo_behavior: UndoBehavior) {
@@ -356,37 +383,37 @@ impl Editor {
         if !undo_behavior.create_undo_point_after(&self.last_undo_behavior) {
             self.edit_stack.undo();
         }
-        self.edit_stack.insert(self.line_buffer.clone());
+        self.edit_stack.insert(self.buffer.line_buffer.clone());
         self.last_undo_behavior = undo_behavior;
     }
 
     fn cut_current_line(&mut self) {
-        let deletion_range = self.line_buffer.current_line_range();
+        let deletion_range = self.buffer.line_buffer.current_line_range();
 
-        let cut_slice = &self.line_buffer.get_buffer()[deletion_range.clone()];
+        let cut_slice = &self.buffer.line_buffer.get_buffer()[deletion_range.clone()];
         if !cut_slice.is_empty() {
             self.cut_buffer.set(cut_slice, ClipboardMode::Lines);
-            self.line_buffer.set_insertion_point(deletion_range.start);
-            self.line_buffer.clear_range(deletion_range);
+            self.buffer.line_buffer.set_insertion_point(deletion_range.start);
+            self.buffer.line_buffer.clear_range(deletion_range);
         }
     }
 
     fn cut_from_start(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
         if insertion_offset > 0 {
             self.cut_buffer.set(
-                &self.line_buffer.get_buffer()[..insertion_offset],
+                &self.buffer.line_buffer.get_buffer()[..insertion_offset],
                 ClipboardMode::Normal,
             );
-            self.line_buffer.clear_to_insertion_point();
+            self.buffer.line_buffer.clear_to_insertion_point();
         }
     }
 
     fn cut_from_start_linewise(&mut self, leave_blank_line: bool) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let end_offset = self.line_buffer.get_buffer()[insertion_offset..]
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let end_offset = self.buffer.line_buffer.get_buffer()[insertion_offset..]
             .find('\n')
-            .map_or(self.line_buffer.len(), |offset| {
+            .map_or(self.buffer.line_buffer.len(), |offset| {
                 // When leave_blank_line is true, we do **not** add 1 to the offset
                 // So there will remain an empty line after the operation
                 if leave_blank_line {
@@ -397,43 +424,43 @@ impl Editor {
             });
         if end_offset > 0 {
             self.cut_buffer.set(
-                &self.line_buffer.get_buffer()[..end_offset],
+                &self.buffer.line_buffer.get_buffer()[..end_offset],
                 ClipboardMode::Lines,
             );
-            self.line_buffer.clear_range(..end_offset);
-            self.line_buffer.move_to_start();
+            self.buffer.line_buffer.clear_range(..end_offset);
+            self.buffer.line_buffer.move_to_start();
         }
     }
 
     fn cut_from_line_start(&mut self) {
-        let previous_offset = self.line_buffer.insertion_point();
-        self.line_buffer.move_to_line_start();
-        let deletion_range = self.line_buffer.insertion_point()..previous_offset;
-        let cut_slice = &self.line_buffer.get_buffer()[deletion_range.clone()];
+        let previous_offset = self.buffer.line_buffer.insertion_point();
+        self.buffer.line_buffer.move_to_line_start();
+        let deletion_range = self.buffer.line_buffer.insertion_point()..previous_offset;
+        let cut_slice = &self.buffer.line_buffer.get_buffer()[deletion_range.clone()];
         if !cut_slice.is_empty() {
             self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
-            self.line_buffer.clear_range(deletion_range);
+            self.buffer.line_buffer.clear_range(deletion_range);
         }
     }
 
     fn cut_from_line_non_blank_start(&mut self) {
-        let cursor_pos = self.line_buffer.insertion_point();
-        self.line_buffer.move_to_line_non_blank_start();
-        let other_pos = self.line_buffer.insertion_point();
+        let cursor_pos = self.buffer.line_buffer.insertion_point();
+        self.buffer.line_buffer.move_to_line_non_blank_start();
+        let other_pos = self.buffer.line_buffer.insertion_point();
         let deletion_range = min(cursor_pos, other_pos)..max(cursor_pos, other_pos);
         self.cut_range(deletion_range);
     }
 
     fn cut_from_end(&mut self) {
-        let cut_slice = &self.line_buffer.get_buffer()[self.line_buffer.insertion_point()..];
+        let cut_slice = &self.buffer.line_buffer.get_buffer()[self.buffer.line_buffer.insertion_point()..];
         if !cut_slice.is_empty() {
             self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
-            self.line_buffer.clear_to_end();
+            self.buffer.line_buffer.clear_to_end();
         }
     }
 
     fn cut_from_end_linewise(&mut self, leave_blank_line: bool) {
-        let start_offset = self.line_buffer.get_buffer()[..self.line_buffer.insertion_point()]
+        let start_offset = self.buffer.line_buffer.get_buffer()[..self.buffer.line_buffer.insertion_point()]
             .rfind('\n')
             .map_or(0, |offset| {
                 // When leave_blank_line is true, we add 1 to the offset
@@ -445,25 +472,25 @@ impl Editor {
                 }
             });
 
-        let cut_slice = &self.line_buffer.get_buffer()[start_offset..];
+        let cut_slice = &self.buffer.line_buffer.get_buffer()[start_offset..];
         if !cut_slice.is_empty() {
             self.cut_buffer.set(cut_slice, ClipboardMode::Lines);
-            self.line_buffer.set_insertion_point(start_offset);
-            self.line_buffer.clear_to_end();
+            self.buffer.line_buffer.set_insertion_point(start_offset);
+            self.buffer.line_buffer.clear_to_end();
         }
     }
 
     fn cut_to_line_end(&mut self) {
-        let cut_slice = &self.line_buffer.get_buffer()
-            [self.line_buffer.insertion_point()..self.line_buffer.find_current_line_end()];
+        let cut_slice = &self.buffer.line_buffer.get_buffer()
+            [self.buffer.line_buffer.insertion_point()..self.buffer.line_buffer.find_current_line_end()];
         if !cut_slice.is_empty() {
             self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
-            self.line_buffer.clear_to_line_end();
+            self.buffer.line_buffer.clear_to_line_end();
         }
     }
 
     fn kill_line(&mut self) {
-        if self.line_buffer.insertion_point() == self.line_buffer.find_current_line_end() {
+        if self.buffer.line_buffer.insertion_point() == self.buffer.line_buffer.find_current_line_end() {
             self.cut_char()
         } else {
             self.cut_to_line_end()
@@ -471,72 +498,72 @@ impl Editor {
     }
 
     fn cut_word_left(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let word_start = self.line_buffer.word_left_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let word_start = self.buffer.line_buffer.word_left_index();
         self.cut_range(word_start..insertion_offset);
     }
 
     fn cut_big_word_left(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let big_word_start = self.line_buffer.big_word_left_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let big_word_start = self.buffer.line_buffer.big_word_left_index();
         self.cut_range(big_word_start..insertion_offset);
     }
 
     fn cut_word_right(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let word_end = self.line_buffer.word_right_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let word_end = self.buffer.line_buffer.word_right_index();
         self.cut_range(insertion_offset..word_end);
     }
 
     fn cut_big_word_right(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let big_word_end = self.line_buffer.next_whitespace();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let big_word_end = self.buffer.line_buffer.next_whitespace();
         self.cut_range(insertion_offset..big_word_end);
     }
 
     fn cut_word_right_to_next(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let next_word_start = self.line_buffer.word_right_start_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let next_word_start = self.buffer.line_buffer.word_right_start_index();
         self.cut_range(insertion_offset..next_word_start);
     }
 
     fn cut_big_word_right_to_next(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let next_big_word_start = self.line_buffer.big_word_right_start_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let next_big_word_start = self.buffer.line_buffer.big_word_right_start_index();
         self.cut_range(insertion_offset..next_big_word_start);
     }
 
     fn cut_char(&mut self) {
-        if self.selection_anchor.is_some() {
+        if self.buffer.anchor().is_some() {
             self.cut_selection_to_cut_buffer();
         } else {
-            let insertion_offset = self.line_buffer.insertion_point();
-            let next_char = self.line_buffer.grapheme_right_index();
+            let insertion_offset = self.buffer.line_buffer.insertion_point();
+            let next_char = self.buffer.line_buffer.grapheme_right_index();
             self.cut_range(insertion_offset..next_char);
         }
     }
 
     fn insert_cut_buffer_before(&mut self) {
         self.delete_selection();
-        insert_clipboard_content_before(&mut self.line_buffer, self.cut_buffer.deref_mut())
+        insert_clipboard_content_before(&mut self.buffer.line_buffer, self.cut_buffer.deref_mut())
     }
 
     fn insert_cut_buffer_after(&mut self) {
         self.delete_selection();
         match self.cut_buffer.get() {
             (content, ClipboardMode::Normal) => {
-                self.line_buffer.move_right();
-                self.line_buffer.insert_str(&content);
+                self.buffer.line_buffer.move_right();
+                self.buffer.line_buffer.insert_str(&content);
             }
             (mut content, ClipboardMode::Lines) => {
                 // TODO: Simplify that?
-                self.line_buffer.move_to_line_start();
-                self.line_buffer.move_line_down();
+                self.buffer.line_buffer.move_to_line_start();
+                self.buffer.line_buffer.move_line_down();
                 if !content.ends_with('\n') {
                     // TODO: Make sure platform requirements are met
                     content.push('\n');
                 }
-                self.line_buffer.insert_str(&content);
+                self.buffer.line_buffer.insert_str(&content);
             }
         }
     }
@@ -550,9 +577,9 @@ impl Editor {
     ) {
         self.update_selection_anchor(select);
         if before_char {
-            self.line_buffer.move_right_before(c, current_line);
+            self.buffer.line_buffer.move_right_before(c, current_line);
         } else {
-            self.line_buffer.move_right_until(c, current_line);
+            self.buffer.line_buffer.move_right_until(c, current_line);
         }
     }
 
@@ -565,87 +592,87 @@ impl Editor {
     ) {
         self.update_selection_anchor(select);
         if before_char {
-            self.line_buffer.move_left_before(c, current_line);
+            self.buffer.line_buffer.move_left_before(c, current_line);
         } else {
-            self.line_buffer.move_left_until(c, current_line);
+            self.buffer.line_buffer.move_left_until(c, current_line);
         }
     }
 
     fn cut_right_until_char(&mut self, c: char, before_char: bool, current_line: bool) {
-        if let Some(index) = self.line_buffer.find_char_right(c, current_line) {
+        if let Some(index) = self.buffer.line_buffer.find_char_right(c, current_line) {
             // Saving the section of the string that will be deleted to be
             // stored into the buffer
             let extra = if before_char { 0 } else { c.len_utf8() };
             let cut_slice =
-                &self.line_buffer.get_buffer()[self.line_buffer.insertion_point()..index + extra];
+                &self.buffer.line_buffer.get_buffer()[self.buffer.line_buffer.insertion_point()..index + extra];
 
             if !cut_slice.is_empty() {
                 self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
 
                 if before_char {
-                    self.line_buffer.delete_right_before_char(c, current_line);
+                    self.buffer.line_buffer.delete_right_before_char(c, current_line);
                 } else {
-                    self.line_buffer.delete_right_until_char(c, current_line);
+                    self.buffer.line_buffer.delete_right_until_char(c, current_line);
                 }
             }
         }
     }
 
     fn cut_left_until_char(&mut self, c: char, before_char: bool, current_line: bool) {
-        if let Some(index) = self.line_buffer.find_char_left(c, current_line) {
+        if let Some(index) = self.buffer.line_buffer.find_char_left(c, current_line) {
             // Saving the section of the string that will be deleted to be
             // stored into the buffer
             let extra = if before_char { c.len_utf8() } else { 0 };
             let cut_slice =
-                &self.line_buffer.get_buffer()[index + extra..self.line_buffer.insertion_point()];
+                &self.buffer.line_buffer.get_buffer()[index + extra..self.buffer.line_buffer.insertion_point()];
 
             if !cut_slice.is_empty() {
                 self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
 
                 if before_char {
-                    self.line_buffer.delete_left_before_char(c, current_line);
+                    self.buffer.line_buffer.delete_left_before_char(c, current_line);
                 } else {
-                    self.line_buffer.delete_left_until_char(c, current_line);
+                    self.buffer.line_buffer.delete_left_until_char(c, current_line);
                 }
             }
         }
     }
 
     fn replace_char(&mut self, character: char) {
-        let insertion_point = self.line_buffer.insertion_point();
-        self.line_buffer.delete_right_grapheme();
+        let insertion_point = self.buffer.line_buffer.insertion_point();
+        self.buffer.line_buffer.delete_right_grapheme();
 
-        self.line_buffer.insert_char(character);
-        self.line_buffer.set_insertion_point(insertion_point);
+        self.buffer.line_buffer.insert_char(character);
+        self.buffer.line_buffer.set_insertion_point(insertion_point);
     }
 
     fn replace_chars(&mut self, n_chars: usize, string: &str) {
         for _ in 0..n_chars {
-            self.line_buffer.delete_right_grapheme();
+            self.buffer.line_buffer.delete_right_grapheme();
         }
 
-        self.line_buffer.insert_str(string);
+        self.buffer.line_buffer.insert_str(string);
     }
 
     fn move_left(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_left();
+        self.buffer.line_buffer.move_left();
     }
 
     fn move_right(&mut self, select: bool) {
         self.update_selection_anchor(select);
-        self.line_buffer.move_right();
+        self.buffer.line_buffer.move_right();
     }
 
     fn select_all(&mut self) {
-        self.selection_anchor = Some(0);
-        self.line_buffer.move_to_end();
+        self.buffer.set_anchor(Some(0));
+        self.buffer.line_buffer.move_to_end();
     }
 
     #[cfg(feature = "system_clipboard")]
     fn cut_selection_to_system(&mut self) {
         if let Some((start, end)) = self.get_selection() {
-            let cut_slice = &self.line_buffer.get_buffer()[start..end];
+            let cut_slice = &self.buffer.line_buffer.get_buffer()[start..end];
             self.system_clipboard.set(cut_slice, ClipboardMode::Normal);
             self.cut_range(start..end);
             self.clear_selection();
@@ -662,14 +689,14 @@ impl Editor {
     #[cfg(feature = "system_clipboard")]
     fn copy_selection_to_system(&mut self) {
         if let Some((start, end)) = self.get_selection() {
-            let cut_slice = &self.line_buffer.get_buffer()[start..end];
+            let cut_slice = &self.buffer.line_buffer.get_buffer()[start..end];
             self.system_clipboard.set(cut_slice, ClipboardMode::Normal);
         }
     }
 
     fn copy_selection_to_cut_buffer(&mut self) {
         if let Some((start, end)) = self.get_selection() {
-            let cut_slice = &self.line_buffer.get_buffer()[start..end];
+            let cut_slice = &self.buffer.line_buffer.get_buffer()[start..end];
             self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
         }
     }
@@ -677,7 +704,7 @@ impl Editor {
     /// If a selection is active returns the selected range, otherwise None.
     /// The range is guaranteed to be ascending.
     pub fn get_selection(&self) -> Option<(usize, usize)> {
-        let selection_anchor = self.selection_anchor?;
+        let selection_anchor = self.buffer.anchor()?;
 
         // Use the mode that was active when the selection was created, not the current mode
         let inclusive = matches!(
@@ -695,126 +722,126 @@ impl Editor {
 
         let end_pos = if selection_is_from_left_to_right {
             if inclusive {
-                self.line_buffer.grapheme_right_index()
+                self.buffer.line_buffer.grapheme_right_index()
             } else {
                 self.insertion_point()
             }
         } else {
             // selection is from right to left
             if inclusive {
-                self.line_buffer
+                self.buffer.line_buffer
                     .grapheme_right_index_from_pos(selection_anchor)
             } else {
                 selection_anchor
             }
         };
 
-        Some((start_pos, end_pos.min(self.line_buffer.len())))
+        Some((start_pos, end_pos.min(self.buffer.line_buffer.len())))
     }
 
     fn delete_selection(&mut self) {
         if let Some((start, end)) = self.get_selection() {
-            self.line_buffer.clear_range_safe(start..end);
+            self.buffer.line_buffer.clear_range_safe(start..end);
             self.clear_selection();
         }
     }
 
     fn backspace(&mut self) {
-        if self.selection_anchor.is_some() {
+        if self.buffer.anchor().is_some() {
             self.delete_selection();
         } else {
-            self.line_buffer.delete_left_grapheme();
+            self.buffer.line_buffer.delete_left_grapheme();
         }
     }
 
     fn delete(&mut self) {
-        if self.selection_anchor.is_some() {
+        if self.buffer.anchor().is_some() {
             self.delete_selection();
         } else {
-            self.line_buffer.delete_right_grapheme();
+            self.buffer.line_buffer.delete_right_grapheme();
         }
     }
 
     fn move_word_left(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.word_left_index(), select);
+        self.move_to_position(self.buffer.line_buffer.word_left_index(), select);
     }
 
     fn move_big_word_left(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.big_word_left_index(), select);
+        self.move_to_position(self.buffer.line_buffer.big_word_left_index(), select);
     }
 
     fn move_word_right(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.word_right_index(), select);
+        self.move_to_position(self.buffer.line_buffer.word_right_index(), select);
     }
 
     fn move_word_right_start(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.word_right_start_index(), select);
+        self.move_to_position(self.buffer.line_buffer.word_right_start_index(), select);
     }
 
     fn move_big_word_right_start(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.big_word_right_start_index(), select);
+        self.move_to_position(self.buffer.line_buffer.big_word_right_start_index(), select);
     }
 
     fn move_word_right_end(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.word_right_end_index(), select);
+        self.move_to_position(self.buffer.line_buffer.word_right_end_index(), select);
     }
 
     fn move_big_word_right_end(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.big_word_right_end_index(), select);
+        self.move_to_position(self.buffer.line_buffer.big_word_right_end_index(), select);
     }
 
     fn insert_char(&mut self, c: char) {
         self.delete_selection();
-        self.line_buffer.insert_char(c);
+        self.buffer.line_buffer.insert_char(c);
     }
 
     fn insert_str(&mut self, str: &str) {
         self.delete_selection();
-        self.line_buffer.insert_str(str);
+        self.buffer.line_buffer.insert_str(str);
     }
 
     fn insert_newline(&mut self) {
         self.delete_selection();
-        self.line_buffer.insert_newline();
+        self.buffer.line_buffer.insert_newline();
     }
 
     fn insert_newline_above(&mut self) {
-        let index = self.line_buffer.find_char_left('\n', false).unwrap_or(0);
-        self.line_buffer.set_insertion_point(index);
-        self.line_buffer.insert_newline();
+        let index = self.buffer.line_buffer.find_char_left('\n', false).unwrap_or(0);
+        self.buffer.line_buffer.set_insertion_point(index);
+        self.buffer.line_buffer.insert_newline();
     }
 
     fn insert_newline_below(&mut self) {
         let index = self
-            .line_buffer
+            .buffer.line_buffer
             .find_char_right('\n', false)
-            .unwrap_or(self.line_buffer.len());
-        self.line_buffer.set_insertion_point(index);
-        self.line_buffer.insert_newline();
+            .unwrap_or(self.buffer.line_buffer.len());
+        self.buffer.line_buffer.set_insertion_point(index);
+        self.buffer.line_buffer.insert_newline();
     }
 
     #[cfg(feature = "system_clipboard")]
     fn paste_from_system(&mut self) {
         self.delete_selection();
-        insert_clipboard_content_before(&mut self.line_buffer, self.system_clipboard.deref_mut());
+        insert_clipboard_content_before(&mut self.buffer.line_buffer, self.system_clipboard.deref_mut());
     }
 
     fn paste_cut_buffer(&mut self) {
         self.delete_selection();
-        insert_clipboard_content_before(&mut self.line_buffer, self.cut_buffer.deref_mut());
+        insert_clipboard_content_before(&mut self.buffer.line_buffer, self.cut_buffer.deref_mut());
     }
 
     fn cut_range(&mut self, range: Range<usize>) {
         if range.start <= range.end {
             self.copy_range(range.clone());
-            self.line_buffer.clear_range_safe(range.clone());
-            self.line_buffer.set_insertion_point(range.start);
+            self.buffer.line_buffer.clear_range_safe(range.clone());
+            self.buffer.line_buffer.set_insertion_point(range.start);
         }
     }
 
     fn copy_range(&mut self, range: Range<usize>) {
         if range.start < range.end {
-            let slice = &self.line_buffer.get_buffer()[range];
+            let slice = &self.buffer.line_buffer.get_buffer()[range];
             self.cut_buffer.set(slice, ClipboardMode::Normal);
         }
     }
@@ -822,10 +849,10 @@ impl Editor {
     /// Delete text strictly between matching `open_char` and `close_char`.
     fn cut_inside_pair(&mut self, open_char: char, close_char: char) {
         if let Some(range) = self
-            .line_buffer
+            .buffer.line_buffer
             .range_inside_current_pair(open_char, close_char)
             .or_else(|| {
-                self.line_buffer
+                self.buffer.line_buffer
                     .range_inside_next_pair(open_char, close_char)
             })
         {
@@ -842,14 +869,14 @@ impl Editor {
     /// while Around also includes trailing whitespace,
     /// or preceding whitespace if there is no trailing whitespace.
     fn word_text_object_range(&self, text_object_scope: TextObjectScope) -> Range<usize> {
-        self.line_buffer
+        self.buffer.line_buffer
             .current_whitespace_range()
             .unwrap_or_else(|| {
-                let word_range = self.line_buffer.current_word_range();
+                let word_range = self.buffer.line_buffer.current_word_range();
                 match text_object_scope {
                     TextObjectScope::Inner => word_range,
                     TextObjectScope::Around => {
-                        self.line_buffer.expand_range_with_whitespace(word_range)
+                        self.buffer.line_buffer.expand_range_with_whitespace(word_range)
                     }
                 }
             })
@@ -863,14 +890,14 @@ impl Editor {
     /// while Around also includes trailing whitespace,
     /// or preceding whitespace if there is no trailing whitespace.
     fn big_word_text_object_range(&self, text_object_scope: TextObjectScope) -> Range<usize> {
-        self.line_buffer
+        self.buffer.line_buffer
             .current_whitespace_range()
             .unwrap_or_else(|| {
-                let big_word_range = self.line_buffer.current_big_word_range();
+                let big_word_range = self.buffer.line_buffer.current_big_word_range();
                 match text_object_scope {
                     TextObjectScope::Inner => big_word_range,
                     TextObjectScope::Around => self
-                        .line_buffer
+                        .buffer.line_buffer
                         .expand_range_with_whitespace(big_word_range),
                 }
             })
@@ -892,10 +919,10 @@ impl Editor {
         text_object_scope: TextObjectScope,
         matching_pair_group: &[(char, char)],
     ) -> Option<Range<usize>> {
-        self.line_buffer
+        self.buffer.line_buffer
             .range_inside_current_pair_in_group(matching_pair_group)
             .or_else(|| {
-                self.line_buffer
+                self.buffer.line_buffer
                     .range_inside_next_pair_in_group(matching_pair_group)
             })
             .and_then(|pair_range| match text_object_scope {
@@ -961,36 +988,36 @@ impl Editor {
     }
 
     pub(crate) fn copy_from_start(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
         if insertion_offset > 0 {
             self.cut_buffer.set(
-                &self.line_buffer.get_buffer()[..insertion_offset],
+                &self.buffer.line_buffer.get_buffer()[..insertion_offset],
                 ClipboardMode::Normal,
             );
         }
     }
 
     pub(crate) fn copy_from_start_linewise(&mut self) {
-        let insertion_point = self.line_buffer.insertion_point();
-        let end_offset = self.line_buffer.get_buffer()[insertion_point..]
+        let insertion_point = self.buffer.line_buffer.insertion_point();
+        let end_offset = self.buffer.line_buffer.get_buffer()[insertion_point..]
             .find('\n')
-            .map_or(self.line_buffer.len(), |offset| insertion_point + offset);
+            .map_or(self.buffer.line_buffer.len(), |offset| insertion_point + offset);
         if end_offset > 0 {
             self.cut_buffer.set(
-                &self.line_buffer.get_buffer()[..end_offset],
+                &self.buffer.line_buffer.get_buffer()[..end_offset],
                 ClipboardMode::Lines,
             );
         }
-        self.line_buffer.move_to_start();
+        self.buffer.line_buffer.move_to_start();
     }
 
     pub(crate) fn copy_from_line_start(&mut self) {
-        let previous_offset = self.line_buffer.insertion_point();
+        let previous_offset = self.buffer.line_buffer.insertion_point();
         let start_offset = {
-            let temp_pos = self.line_buffer.insertion_point();
-            self.line_buffer.move_to_line_start();
-            let start = self.line_buffer.insertion_point();
-            self.line_buffer.set_insertion_point(temp_pos);
+            let temp_pos = self.buffer.line_buffer.insertion_point();
+            self.buffer.line_buffer.move_to_line_start();
+            let start = self.buffer.line_buffer.insertion_point();
+            self.buffer.line_buffer.set_insertion_point(temp_pos);
             start
         };
         let copy_range = start_offset..previous_offset;
@@ -998,82 +1025,82 @@ impl Editor {
     }
 
     pub(crate) fn copy_from_line_non_blank_start(&mut self) {
-        let cursor_pos = self.line_buffer.insertion_point();
-        self.line_buffer.move_to_line_non_blank_start();
-        let other_pos = self.line_buffer.insertion_point();
-        self.line_buffer.set_insertion_point(cursor_pos);
+        let cursor_pos = self.buffer.line_buffer.insertion_point();
+        self.buffer.line_buffer.move_to_line_non_blank_start();
+        let other_pos = self.buffer.line_buffer.insertion_point();
+        self.buffer.line_buffer.set_insertion_point(cursor_pos);
         let copy_range = min(cursor_pos, other_pos)..max(cursor_pos, other_pos);
         self.copy_range(copy_range);
     }
 
     pub(crate) fn copy_from_end(&mut self) {
-        let copy_range = self.line_buffer.insertion_point()..self.line_buffer.len();
+        let copy_range = self.buffer.line_buffer.insertion_point()..self.buffer.line_buffer.len();
         self.copy_range(copy_range);
     }
 
     pub(crate) fn copy_from_end_linewise(&mut self) {
-        self.line_buffer.move_to_line_start();
-        let copy_range = self.line_buffer.insertion_point()..self.line_buffer.len();
+        self.buffer.line_buffer.move_to_line_start();
+        let copy_range = self.buffer.line_buffer.insertion_point()..self.buffer.line_buffer.len();
         if copy_range.start < copy_range.end {
-            let slice = &self.line_buffer.get_buffer()[copy_range];
+            let slice = &self.buffer.line_buffer.get_buffer()[copy_range];
             self.cut_buffer.set(slice, ClipboardMode::Lines);
         }
     }
 
     pub(crate) fn copy_to_line_end(&mut self) {
         let copy_range =
-            self.line_buffer.insertion_point()..self.line_buffer.find_current_line_end();
+            self.buffer.line_buffer.insertion_point()..self.buffer.line_buffer.find_current_line_end();
         self.copy_range(copy_range);
     }
 
     pub(crate) fn copy_word_left(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let word_start = self.line_buffer.word_left_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let word_start = self.buffer.line_buffer.word_left_index();
         self.copy_range(word_start..insertion_offset);
     }
 
     pub(crate) fn copy_big_word_left(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let big_word_start = self.line_buffer.big_word_left_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let big_word_start = self.buffer.line_buffer.big_word_left_index();
         self.copy_range(big_word_start..insertion_offset);
     }
 
     pub(crate) fn copy_word_right(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let word_end = self.line_buffer.word_right_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let word_end = self.buffer.line_buffer.word_right_index();
         self.copy_range(insertion_offset..word_end);
     }
 
     pub(crate) fn copy_big_word_right(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let big_word_end = self.line_buffer.next_whitespace();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let big_word_end = self.buffer.line_buffer.next_whitespace();
         self.copy_range(insertion_offset..big_word_end);
     }
 
     pub(crate) fn copy_word_right_to_next(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let next_word_start = self.line_buffer.word_right_start_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let next_word_start = self.buffer.line_buffer.word_right_start_index();
         self.copy_range(insertion_offset..next_word_start);
     }
 
     pub(crate) fn copy_big_word_right_to_next(&mut self) {
-        let insertion_offset = self.line_buffer.insertion_point();
-        let next_big_word_start = self.line_buffer.big_word_right_start_index();
+        let insertion_offset = self.buffer.line_buffer.insertion_point();
+        let next_big_word_start = self.buffer.line_buffer.big_word_right_start_index();
         self.copy_range(insertion_offset..next_big_word_start);
     }
 
     pub(crate) fn copy_right_until_char(&mut self, c: char, before_char: bool, current_line: bool) {
-        if let Some(index) = self.line_buffer.find_char_right(c, current_line) {
+        if let Some(index) = self.buffer.line_buffer.find_char_right(c, current_line) {
             let extra = if before_char { 0 } else { c.len_utf8() };
-            let copy_range = self.line_buffer.insertion_point()..index + extra;
+            let copy_range = self.buffer.line_buffer.insertion_point()..index + extra;
             self.copy_range(copy_range);
         }
     }
 
     pub(crate) fn copy_left_until_char(&mut self, c: char, before_char: bool, current_line: bool) {
-        if let Some(index) = self.line_buffer.find_char_left(c, current_line) {
+        if let Some(index) = self.buffer.line_buffer.find_char_left(c, current_line) {
             let extra = if before_char { c.len_utf8() } else { 0 };
-            let copy_range = index + extra..self.line_buffer.insertion_point();
+            let copy_range = index + extra..self.buffer.line_buffer.insertion_point();
             self.copy_range(copy_range);
         }
     }
@@ -1081,10 +1108,10 @@ impl Editor {
     /// Copy text strictly between matching `open_char` and `close_char`.
     fn copy_inside_pair(&mut self, open_char: char, close_char: char) {
         if let Some(range) = self
-            .line_buffer
+            .buffer.line_buffer
             .range_inside_current_pair(open_char, close_char)
             .or_else(|| {
-                self.line_buffer
+                self.buffer.line_buffer
                     .range_inside_next_pair(open_char, close_char)
             })
         {
@@ -1094,8 +1121,8 @@ impl Editor {
 
     /// Expand the range to include `open_char` and `close_char`
     fn expand_range_to_include_pair(&self, range: Range<usize>) -> Option<Range<usize>> {
-        let start = self.line_buffer.grapheme_left_index_from_pos(range.start);
-        let end = self.line_buffer.grapheme_right_index_from_pos(range.end);
+        let start = self.buffer.line_buffer.grapheme_left_index_from_pos(range.start);
+        let end = self.buffer.line_buffer.grapheme_right_index_from_pos(range.end);
 
         Some(start..end)
     }
@@ -1103,10 +1130,10 @@ impl Editor {
     /// Delete text around matching `open_char` and `close_char` (including the pair characters).
     fn cut_around_pair(&mut self, open_char: char, close_char: char) {
         if let Some(around_range) = self
-            .line_buffer
+            .buffer.line_buffer
             .range_inside_current_pair(open_char, close_char)
             .or_else(|| {
-                self.line_buffer
+                self.buffer.line_buffer
                     .range_inside_next_pair(open_char, close_char)
             })
             .and_then(|range| self.expand_range_to_include_pair(range))
@@ -1118,10 +1145,10 @@ impl Editor {
     /// Copy text around matching `open_char` and `close_char` (including the pair characters).
     fn copy_around_pair(&mut self, open_char: char, close_char: char) {
         if let Some(around_range) = self
-            .line_buffer
+            .buffer.line_buffer
             .range_inside_current_pair(open_char, close_char)
             .or_else(|| {
-                self.line_buffer
+                self.buffer.line_buffer
                     .range_inside_next_pair(open_char, close_char)
             })
             .and_then(|range| self.expand_range_to_include_pair(range))
@@ -1161,13 +1188,67 @@ mod test {
         editor
     }
 
+    mod set_selection {
+        use super::*;
+        use crate::core_editor::selection::{
+            Boundary, End, Side, SetSelection,
+        };
+        use pretty_assertions::assert_eq;
+
+        // move: both endpoints to the next grapheme → empty range one right
+        #[test]
+        fn move_right_collapses_to_point() {
+            let mut editor = editor_with("hello");
+            editor.buffer.line_buffer.set_insertion_point(0);
+
+            editor.set_selection(SetSelection {
+                anchor: End::To(Boundary::GraphemeRight),
+                head: End::To(Boundary::GraphemeRight),
+            });
+
+            assert_eq!(editor.insertion_point(), 1);
+            assert_eq!(editor.buffer.anchor(), None);
+        }
+
+        // extend: anchor stays put, head jumps to the end of the word
+        #[test]
+        fn extend_to_word_end_keeps_anchor() {
+            let mut editor = editor_with("hello world");
+            editor.buffer.line_buffer.set_insertion_point(0);
+
+            editor.set_selection(SetSelection {
+                anchor: End::Keep,
+                head: End::To(Boundary::WordRight),
+            });
+
+            assert_eq!(editor.buffer.anchor(), Some(0));
+            assert_eq!(editor.insertion_point(), 5);
+        }
+
+        // o: swap anchor and head from the pre-transform snapshot
+        #[test]
+        fn swap_flips_endpoints() {
+            let mut editor = editor_with("hello world");
+            editor.buffer.line_buffer.set_insertion_point(5);
+            editor.buffer.set_anchor(Some(0));
+
+            editor.set_selection(SetSelection {
+                anchor: End::Pin(Side::Head),
+                head: End::Pin(Side::Anchor),
+            });
+
+            assert_eq!(editor.insertion_point(), 0);
+            assert_eq!(editor.buffer.anchor(), Some(5));
+        }
+    }
+
     #[rstest]
     #[case("abc def ghi", 11, "abc def ")]
     #[case("abc def-ghi", 11, "abc def-")]
     #[case("abc def.ghi", 11, "abc ")]
     fn test_cut_word_left(#[case] input: &str, #[case] position: usize, #[case] expected: &str) {
         let mut editor = editor_with(input);
-        editor.line_buffer.set_insertion_point(position);
+        editor.buffer.line_buffer.set_insertion_point(position);
 
         editor.cut_word_left();
 
@@ -1185,7 +1266,7 @@ mod test {
         #[case] expected: &str,
     ) {
         let mut editor = editor_with(input);
-        editor.line_buffer.set_insertion_point(position);
+        editor.buffer.line_buffer.set_insertion_point(position);
 
         editor.cut_big_word_left();
 
@@ -1211,7 +1292,7 @@ mod test {
         #[case] expected: &str,
     ) {
         let mut editor = editor_with(input);
-        editor.line_buffer.set_insertion_point(position);
+        editor.buffer.line_buffer.set_insertion_point(position);
         for _ in 0..repeat {
             editor.cut_right_until_char(search_char, before_char, true);
         }
@@ -1230,7 +1311,7 @@ mod test {
         #[case] expected: &str,
     ) {
         let mut editor = editor_with(input);
-        editor.line_buffer.set_insertion_point(position);
+        editor.buffer.line_buffer.set_insertion_point(position);
 
         editor.replace_char(replacement);
 
@@ -1270,7 +1351,7 @@ mod test {
     #[test]
     fn test_undo_delete_works_on_word_boundaries() {
         let mut editor = editor_with("This  is a test");
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         for _ in 0..7 {
             editor.run_edit_command(&EditCommand::Delete);
         }
@@ -1327,7 +1408,7 @@ mod test {
     #[test]
     fn test_undo_delete_with_newline() {
         let mut editor = editor_with("This \n is a test");
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         for _ in 0..8 {
             editor.run_edit_command(&EditCommand::Delete);
         }
@@ -1345,7 +1426,7 @@ mod test {
         // CLRF delete is a special case, since the first character of the
         // grapheme is \r rather than \n
         let mut editor = editor_with("This \r\n is a test");
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         for _ in 0..8 {
             editor.run_edit_command(&EditCommand::Delete);
         }
@@ -1361,23 +1442,23 @@ mod test {
     #[test]
     fn test_swap_cursor_and_anchor() {
         let mut editor = editor_with("This is some test content");
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         for _ in 0..3 {
             editor.run_edit_command(&EditCommand::MoveRight { select: true });
         }
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.buffer.anchor(), Some(0));
         assert_eq!(editor.insertion_point(), 3);
         assert_eq!(editor.get_selection(), Some((0, 3)));
 
         editor.run_edit_command(&EditCommand::SwapCursorAndAnchor);
-        assert_eq!(editor.selection_anchor, Some(3));
+        assert_eq!(editor.buffer.anchor(), Some(3));
         assert_eq!(editor.insertion_point(), 0);
         assert_eq!(editor.get_selection(), Some((0, 3)));
 
         editor.run_edit_command(&EditCommand::SwapCursorAndAnchor);
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.buffer.anchor(), Some(0));
         assert_eq!(editor.insertion_point(), 3);
         assert_eq!(editor.get_selection(), Some((0, 3)));
     }
@@ -1385,14 +1466,14 @@ mod test {
     #[test]
     fn test_vi_normal_mode_inclusive_selection() {
         let mut editor = editor_with("This is some test content");
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
         editor.update_selection_anchor(true);
 
         for _ in 0..3 {
             editor.run_edit_command(&EditCommand::MoveRight { select: true });
         }
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.buffer.anchor(), Some(0));
         assert_eq!(editor.insertion_point(), 3);
         // In Vi normal mode, selection should be inclusive (include character at position 3)
         assert_eq!(editor.get_selection(), Some((0, 4)));
@@ -1401,14 +1482,14 @@ mod test {
     #[test]
     fn test_vi_normal_mode_inclusive_selection_backward() {
         let mut editor = editor_with("This is some test content");
-        editor.line_buffer.set_insertion_point(4); // Start at position 4 ('i')
+        editor.buffer.line_buffer.set_insertion_point(4); // Start at position 4 ('i')
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
         editor.update_selection_anchor(true);
 
         for _ in 0..3 {
             editor.run_edit_command(&EditCommand::MoveLeft { select: true });
         }
-        assert_eq!(editor.selection_anchor, Some(4));
+        assert_eq!(editor.buffer.anchor(), Some(4));
         assert_eq!(editor.insertion_point(), 1); // cursor at position 1 ('h')
                                                  // In Vi normal mode, selection should be inclusive from cursor to anchor+1
                                                  // So it should select from position 1 to 5 (inclusive of char at position 4)
@@ -1419,7 +1500,7 @@ mod test {
     fn test_vi_normal_mode_cut_selection_backward() {
         let mut editor = editor_with("This is some test content");
 
-        editor.line_buffer.set_insertion_point(4); // Start at position 4 (' ')
+        editor.buffer.line_buffer.set_insertion_point(4); // Start at position 4 (' ')
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
         editor.update_selection_anchor(true);
 
@@ -1444,7 +1525,7 @@ mod test {
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
 
         // Start at position 0, enter visual mode by selecting
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         // Move right 4 characters to select "hello" (from pos 0 to pos 4)
@@ -1471,7 +1552,7 @@ mod test {
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
 
         // Start at position 0, create selection by moving cursor
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         // Move right to select "hello" (positions 0-4, should be inclusive of pos 4)
@@ -1496,20 +1577,20 @@ mod test {
         #[test]
         fn test_cut_selection_system() {
             let mut editor = editor_with("This is a test!");
-            editor.selection_anchor = Some(editor.line_buffer.len());
-            editor.line_buffer.set_insertion_point(0);
+            editor.buffer.set_anchor(Some(editor.buffer.line_buffer.len()));
+            editor.buffer.line_buffer.set_insertion_point(0);
             editor.run_edit_command(&EditCommand::CutSelectionSystem);
-            assert!(editor.line_buffer.get_buffer().is_empty());
+            assert!(editor.buffer.line_buffer.get_buffer().is_empty());
         }
         #[test]
         fn test_copypaste_selection_system() {
             let s = "This is a test!";
             let mut editor = editor_with(s);
-            editor.selection_anchor = Some(editor.line_buffer.len());
-            editor.line_buffer.set_insertion_point(0);
+            editor.buffer.set_anchor(Some(editor.buffer.line_buffer.len()));
+            editor.buffer.line_buffer.set_insertion_point(0);
             editor.run_edit_command(&EditCommand::CopySelectionSystem);
             editor.run_edit_command(&EditCommand::PasteSystem);
-            pretty_assertions::assert_eq!(editor.line_buffer.len(), s.len() * 2);
+            pretty_assertions::assert_eq!(editor.buffer.line_buffer.len(), s.len() * 2);
         }
     }
 
@@ -1699,7 +1780,7 @@ mod test {
         let mut editor = editor_with("hello world");
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
 
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         for _ in 0..4 {
@@ -1707,7 +1788,7 @@ mod test {
         }
 
         assert_eq!(editor.insertion_point(), 4);
-        assert_eq!(editor.selection_anchor, Some(0));
+        assert_eq!(editor.buffer.anchor(), Some(0));
         assert_eq!(editor.get_selection(), Some((0, 5))); // inclusive selection
 
         editor.run_edit_command(&EditCommand::CutSelection);
@@ -1723,7 +1804,7 @@ mod test {
         let mut editor = editor_with("hello world");
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
 
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         for _ in 0..4 {
@@ -1743,7 +1824,7 @@ mod test {
         let mut editor = editor_with("hello world");
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
 
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         for _ in 0..4 {
@@ -1767,7 +1848,7 @@ mod test {
         let mut editor = editor_with("hello world");
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
 
-        editor.line_buffer.set_insertion_point(0);
+        editor.buffer.line_buffer.set_insertion_point(0);
         editor.update_selection_anchor(true);
 
         for _ in 0..4 {
@@ -2003,7 +2084,7 @@ mod test {
             object_type: TextObjectType::Word,
         }); // Cut the emoji
 
-        assert!(editor.line_buffer.is_valid()); // Should not panic or be invalid
+        assert!(editor.buffer.line_buffer.is_valid()); // Should not panic or be invalid
     }
 
     #[rstest]
@@ -2137,7 +2218,7 @@ mod test {
         #[case] expected: Option<std::ops::Range<usize>>,
     ) {
         let mut editor = editor_with(input);
-        editor.line_buffer.set_insertion_point(cursor_pos);
+        editor.buffer.line_buffer.set_insertion_point(cursor_pos);
         let result = editor.quote_text_object_range(scope);
         assert_eq!(result, expected);
     }

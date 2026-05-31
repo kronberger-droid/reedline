@@ -185,10 +185,15 @@ impl LineBuffer {
 
     /// Cursor position *behind* the next word to the right
     pub fn word_right_index(&self) -> usize {
-        self.lines[self.insertion_point..]
+        self.word_right_index_from_pos(self.insertion_point)
+    }
+
+    /// Cursor position *behind* the next word to the right from the given position
+    pub(crate) fn word_right_index_from_pos(&self, pos: usize) -> usize {
+        self.lines[pos..]
             .split_word_bound_indices()
             .find(|(_, word)| !is_whitespace_str(word))
-            .map(|(i, word)| self.insertion_point + i + word.len())
+            .map(|(i, word)| pos + i + word.len())
             .unwrap_or_else(|| self.lines.len())
     }
 

@@ -1,8 +1,9 @@
 use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
+use crate::core_editor::{commit, RestPolicy};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
-use crate::prompt::{PromptEditMode, PromptViMode};
+use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
@@ -18,7 +19,10 @@ pub struct Editor {
     system_clipboard: Box<dyn Clipboard>,
     edit_stack: EditStack<LineBuffer>,
     last_undo_behavior: UndoBehavior,
-    selection_mode: Option<PromptEditMode>,
+    /// Whether the active selection is inclusive, captured when its anchor was
+    /// planted. Fixed at creation so a later mode switch (e.g. Vi `c` → insert
+    /// before the cut) can't change the operated range. `None` when no selection.
+    selection_inclusive: Option<bool>,
     edit_mode: PromptEditMode,
 }
 
@@ -31,7 +35,7 @@ impl Default for Editor {
             system_clipboard: get_system_clipboard(),
             edit_stack: EditStack::new(),
             last_undo_behavior: UndoBehavior::CreateUndoPoint,
-            selection_mode: None,
+            selection_inclusive: None,
             edit_mode: PromptEditMode::Default,
         }
     }
@@ -202,7 +206,8 @@ impl Editor {
         if !matches!(command.edit_type(), EditType::MoveCursor { select: true }) {
             self.clear_selection();
         }
-        if let EditType::MoveCursor { select: true } = command.edit_type() {}
+
+        self.commit_cursor();
 
         let new_undo_behavior = match (command, command.edit_type()) {
             (_, EditType::MoveCursor { .. }) => UndoBehavior::MoveCursor,
@@ -232,20 +237,20 @@ impl Editor {
 
     pub(crate) fn clear_selection(&mut self) {
         self.line_buffer.clear_selection();
-        self.selection_mode = None;
+        self.selection_inclusive = None;
     }
 
-    /// Record the active edit mode on the selection if `select` is about to
-    /// plant a fresh anchor. No-op when an anchor already exists or when
-    /// `select` is false.
-    fn note_selection_mode_if_planting(&mut self, select: bool) {
+    /// When a fresh anchor is about to be planted, capture whether the selection
+    /// is inclusive under the current rest policy. No-op when an anchor already
+    /// exists or `select` is false.
+    fn note_selection_inclusivity_if_planting(&mut self, select: bool) {
         if select && self.line_buffer.selection_anchor().is_none() {
-            self.selection_mode = Some(self.edit_mode.clone());
+            self.selection_inclusive = Some(self.edit_mode.rest_policy() == RestPolicy::OnGrapheme);
         }
     }
 
     fn update_selection_anchor(&mut self, select: bool) {
-        self.note_selection_mode_if_planting(select);
+        self.note_selection_inclusivity_if_planting(select);
         if select {
             if self.line_buffer.selection_anchor().is_none() {
                 self.line_buffer
@@ -259,10 +264,25 @@ impl Editor {
     /// Set the current edit mode
     pub fn set_edit_mode(&mut self, mode: PromptEditMode) {
         self.edit_mode = mode;
+        // A mode change can switch to a stricter rest policy (e.g. Vi insert →
+        // normal), so re-normalize the resting cursor under the new policy.
+        self.commit_cursor();
+    }
+
+    /// Normalize the cursor at the single commit boundary: clamp + grapheme-snap
+    /// (universal), then apply the active mode's [`RestPolicy`]. Total and
+    /// idempotent, so it is safe to call after any state change.
+    fn commit_cursor(&mut self) {
+        let committed = commit(
+            self.line_buffer.get_buffer(),
+            self.line_buffer.cursor(),
+            self.edit_mode.rest_policy(),
+        );
+        self.line_buffer.set_cursor(committed);
     }
 
     fn move_to_position(&mut self, position: usize, select: bool) {
-        self.note_selection_mode_if_planting(select);
+        self.note_selection_inclusivity_if_planting(select);
         self.line_buffer.move_head(position, select);
     }
 
@@ -296,6 +316,9 @@ impl Editor {
     /// Insertion point update to the end of the buffer.
     pub(crate) fn set_buffer(&mut self, buffer: String, undo_behavior: UndoBehavior) {
         self.line_buffer.set_buffer(buffer);
+        // History navigation replaces the buffer outside the command path, so
+        // normalize the cursor here too (e.g. Vi normal must not sit past the end).
+        self.commit_cursor();
         self.update_undo_state(undo_behavior);
     }
 
@@ -685,11 +708,13 @@ impl Editor {
         self.line_buffer.selection_anchor()?;
         let cursor = self.line_buffer.cursor();
 
-        // Use the mode that was active when the selection was created, not the current mode
-        let inclusive = matches!(
-            self.selection_mode.as_ref().unwrap_or(&self.edit_mode),
-            PromptEditMode::Vi(PromptViMode::Normal)
-        );
+        // Inclusivity was captured (via the rest policy) when the selection was
+        // created, so a later mode switch doesn't change the operated range. Fall
+        // back to the current policy for anchors planted outside the motion path
+        // (e.g. `select_all`).
+        let inclusive = self
+            .selection_inclusive
+            .unwrap_or_else(|| self.edit_mode.rest_policy() == RestPolicy::OnGrapheme);
 
         // The range is `[start, end)`. In inclusive (Vi normal) mode the
         // grapheme under the high end is part of the selection, so the end
@@ -1145,6 +1170,7 @@ fn insert_clipboard_content_before(line_buffer: &mut LineBuffer, clipboard: &mut
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::prompt::PromptViMode;
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
@@ -1152,6 +1178,144 @@ mod test {
         let mut editor = Editor::default();
         editor.set_buffer(buffer.to_string(), UndoBehavior::CreateUndoPoint);
         editor
+    }
+
+    fn vi_editor(buffer: &str, vi_mode: PromptViMode) -> Editor {
+        let mut editor = editor_with(buffer);
+        editor.set_edit_mode(PromptEditMode::Vi(vi_mode));
+        editor
+    }
+
+    // The Vi-normal cursor invariant ("cursor never rests past the last
+    // grapheme") is enforced by the `RestPolicy` commit boundary in
+    // `run_edit_command`, not by a per-command clamp. These cover the
+    // behavioural scenarios from nushell/reedline#1069 by driving real
+    // `EditCommand`s through that boundary.
+
+    #[test]
+    fn vi_normal_clamps_cursor_off_the_end() {
+        let mut editor = vi_editor("hello", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToEnd { select: false });
+        // rests on the last grapheme 'o' (byte 4), not past it (byte 5)
+        assert_eq!(editor.insertion_point(), 4);
+    }
+
+    #[test]
+    fn vi_normal_clamps_to_line_end() {
+        let mut editor = vi_editor("hello", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToLineEnd { select: false });
+        assert_eq!(editor.insertion_point(), 4);
+    }
+
+    #[test]
+    fn vi_insert_does_not_clamp_off_the_end() {
+        let mut editor = vi_editor("hello", PromptViMode::Insert);
+        editor.run_edit_command(&EditCommand::MoveToEnd { select: false });
+        // insert mode's caret may sit past the last grapheme
+        assert_eq!(editor.insertion_point(), 5);
+    }
+
+    #[test]
+    fn vi_normal_empty_buffer_stays_at_zero() {
+        let mut editor = vi_editor("", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToEnd { select: false });
+        assert_eq!(editor.insertion_point(), 0);
+    }
+
+    #[test]
+    fn vi_normal_within_bounds_is_unchanged() {
+        let mut editor = vi_editor("hello", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToPosition {
+            position: 2,
+            select: false,
+        });
+        assert_eq!(editor.insertion_point(), 2);
+    }
+
+    #[test]
+    fn vi_normal_clamps_onto_multibyte_grapheme() {
+        let mut editor = vi_editor("café", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToEnd { select: false });
+        // 'é' is 2 bytes, so the last grapheme starts at byte 3, not 4
+        assert_eq!(editor.insertion_point(), "caf".len());
+    }
+
+    // The commit boundary also fires on the two state changes that bypass
+    // `run_edit_command`: buffer replacement (history navigation) and edit-mode
+    // transitions (e.g. Esc into Vi normal). Both were clamped by #1069 too.
+
+    #[test]
+    fn vi_normal_set_buffer_clamps_cursor() {
+        // history navigation replaces the buffer (cursor lands at the end)
+        let mut editor = vi_editor("", PromptViMode::Normal);
+        editor.set_buffer("hello".to_string(), UndoBehavior::CreateUndoPoint);
+        assert_eq!(editor.insertion_point(), 4);
+    }
+
+    #[test]
+    fn vi_normal_set_buffer_clamps_multibyte() {
+        let mut editor = vi_editor("", PromptViMode::Normal);
+        editor.set_buffer("café".to_string(), UndoBehavior::CreateUndoPoint);
+        assert_eq!(editor.insertion_point(), "caf".len());
+    }
+
+    #[test]
+    fn entering_vi_normal_clamps_cursor() {
+        // simulates Esc: the cursor sits past the end in insert mode, then the
+        // mode flips to normal and the commit-on-mode-change pulls it back
+        let mut editor = vi_editor("hello", PromptViMode::Insert);
+        editor.run_edit_command(&EditCommand::MoveToEnd { select: false });
+        assert_eq!(editor.insertion_point(), 5);
+        editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
+        assert_eq!(editor.insertion_point(), 4);
+    }
+
+    #[test]
+    fn entering_vi_insert_does_not_move_cursor() {
+        let mut editor = vi_editor("hello", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToPosition {
+            position: 4,
+            select: false,
+        });
+        editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Insert));
+        assert_eq!(editor.insertion_point(), 4);
+    }
+
+    // Selections built by selecting motions still cut the right bytes after the
+    // commit boundary runs on every move — including across a multibyte grapheme.
+
+    #[test]
+    fn vi_normal_selection_cut_is_inclusive() {
+        let mut editor = vi_editor("hello", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToPosition {
+            position: 0,
+            select: false,
+        });
+        for _ in 0..2 {
+            editor.run_edit_command(&EditCommand::MoveRight { select: true });
+        }
+        // head on 'l' (byte 2); Vi-normal selection is inclusive → covers [0,3)
+        assert_eq!(editor.get_selection(), Some((0, 3)));
+        editor.run_edit_command(&EditCommand::CutSelection);
+        assert_eq!(editor.get_buffer(), "lo");
+        assert_eq!(editor.cut_buffer.get().0, "hel");
+    }
+
+    #[test]
+    fn vi_normal_selection_cut_spans_multibyte_grapheme() {
+        let mut editor = vi_editor("caféx", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::MoveToPosition {
+            position: 0,
+            select: false,
+        });
+        for _ in 0..3 {
+            editor.run_edit_command(&EditCommand::MoveRight { select: true });
+        }
+        // head on 'é' (byte 3); inclusive end extends over both bytes of é → 5
+        assert_eq!(editor.get_selection(), Some((0, 5)));
+        editor.run_edit_command(&EditCommand::CutSelection);
+        assert_eq!(editor.get_buffer(), "x");
+        assert_eq!(editor.cut_buffer.get().0, "café");
     }
 
     #[rstest]

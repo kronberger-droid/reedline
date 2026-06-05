@@ -1,7 +1,7 @@
 use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
-use crate::core_editor::{commit, RestPolicy};
+use crate::core_editor::{commit, locate, Boundary, End, RestPolicy, SetSelection};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -284,6 +284,30 @@ impl Editor {
     fn move_to_position(&mut self, position: usize, select: bool) {
         self.note_selection_inclusivity_if_planting(select);
         self.line_buffer.move_head(position, select);
+    }
+
+    /// Resolve and apply a [`SetSelection`], then normalize at the commit
+    /// boundary. Boundaries resolve relative to the current head; both endpoints
+    /// then commit from the pre-transform snapshot (see [`Cursor::transform`]).
+    ///
+    /// This is the single primitive motions and selection ops lower to. Re-lower
+    /// a motion (e.g. `move_right`/`move_left`) through here to give it a caller.
+    fn set_selection(&mut self, op: SetSelection<Boundary>) {
+        let was_empty = self.line_buffer.selection_anchor().is_none();
+        let head = self.insertion_point();
+        let resolved = op.resolve(|b| locate(self.line_buffer.get_buffer(), head, b));
+        let next = self.line_buffer.cursor().transform(resolved);
+        self.line_buffer.set_cursor(next);
+        self.commit_cursor();
+
+        match (was_empty, self.line_buffer.selection_anchor().is_some()) {
+            (true, true) => {
+                self.selection_inclusive =
+                    Some(self.edit_mode.rest_policy() == RestPolicy::OnGrapheme)
+            }
+            (_, false) => self.selection_inclusive = None,
+            _ => {}
+        }
     }
 
     pub(crate) fn move_line_up(&mut self, select: bool) {
@@ -656,11 +680,29 @@ impl Editor {
     }
 
     fn move_left(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.grapheme_left_index(), select);
+        match select {
+            true => self.set_selection(SetSelection {
+                anchor: End::Keep,
+                head: End::To(Boundary::GraphemeLeft),
+            }),
+            false => self.set_selection(SetSelection {
+                anchor: End::To(Boundary::GraphemeLeft),
+                head: End::To(Boundary::GraphemeLeft),
+            }),
+        }
     }
 
     fn move_right(&mut self, select: bool) {
-        self.move_to_position(self.line_buffer.grapheme_right_index(), select);
+        match select {
+            true => self.set_selection(SetSelection {
+                anchor: End::Keep,
+                head: End::To(Boundary::GraphemeRight),
+            }),
+            false => self.set_selection(SetSelection {
+                anchor: End::To(Boundary::GraphemeRight),
+                head: End::To(Boundary::GraphemeRight),
+            }),
+        }
     }
 
     fn select_all(&mut self) {

@@ -2,7 +2,7 @@ use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer}
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::next_grapheme_boundary;
-use crate::core_editor::{commit, locate, Boundary, End, RestPolicy, SetSelection};
+use crate::core_editor::{commit, locate, Boundary, RestPolicy, SetSelection};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -718,29 +718,11 @@ impl Editor {
     }
 
     fn move_left(&mut self, select: bool) {
-        match select {
-            true => self.set_selection(SetSelection {
-                anchor: End::Keep,
-                head: End::To(Boundary::GraphemeLeft),
-            }),
-            false => self.set_selection(SetSelection {
-                anchor: End::To(Boundary::GraphemeLeft),
-                head: End::To(Boundary::GraphemeLeft),
-            }),
-        }
+        self.set_selection(SetSelection::motion(Boundary::GraphemeLeft, select));
     }
 
     fn move_right(&mut self, select: bool) {
-        match select {
-            true => self.set_selection(SetSelection {
-                anchor: End::Keep,
-                head: End::To(Boundary::GraphemeRight),
-            }),
-            false => self.set_selection(SetSelection {
-                anchor: End::To(Boundary::GraphemeRight),
-                head: End::To(Boundary::GraphemeRight),
-            }),
-        }
+        self.set_selection(SetSelection::motion(Boundary::GraphemeRight, select));
     }
 
     fn select_all(&mut self) {

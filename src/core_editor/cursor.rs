@@ -174,13 +174,8 @@ impl Cursor {
             return Self::point(target);
         }
 
-        // TODO(you): flip the anchor onto the far edge of its grapheme when the
-        // direction changes; otherwise leave it. Three cases:
-        //   - was forward  (head >= anchor) and target crosses before  the anchor
-        //       (target <  anchor) → next_grapheme_boundary(buf, anchor)
-        //   - was backward (head <  anchor) and target crosses to/after the anchor
-        //       (target >= anchor) → prev_grapheme_boundary(buf, anchor)
-        //   - otherwise → self.anchor   (unchanged)
+        // Flip the anchor onto the far edge of its grapheme when the direction
+        // changes; otherwise leave it (Helix `Range::put_cursor` semantics).
         let anchor: usize = if self.head >= self.anchor && target < self.anchor {
             next_grapheme_boundary(buf, self.anchor)
         } else if self.head < self.anchor && target >= self.anchor {

@@ -89,7 +89,10 @@ pub(crate) fn locate_word(
     // start), and its `End` one with a boundary on its right (or buffer end).
     let is_target = |i: usize| -> bool {
         let ch = chars[i].1;
-        if ch.is_whitespace() {
+        // A word excludes whitespace and line endings — use the module's own
+        // classifier rather than a bare `is_whitespace` so `\n` (an `Eol`) is
+        // handled by the same definition the boundary checks trust.
+        if matches!(categorize_char(ch), CharClass::Whitespace | CharClass::Eol) {
             return false;
         }
         match edge {

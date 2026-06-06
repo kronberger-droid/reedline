@@ -173,7 +173,7 @@ impl Motion {
     /// those keep their existing per-variant `EditCommand` lowering. Both the
     /// bare-motion path (`Move`/`Extend`) and the operator path (`Cut`/`Copy`)
     /// read this one mapping, so the vi-word semantics live in a single place.
-    fn target(&self) -> Option<MotionTarget> {
+    pub(super) fn target(&self) -> Option<MotionTarget> {
         // A word target, spelled compactly.
         let word = |kind: WordKind, edge: WordEdge, direction: Direction| MotionTarget::Word {
             kind,

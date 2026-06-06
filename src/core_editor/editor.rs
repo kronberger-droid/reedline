@@ -1,11 +1,12 @@
 use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
+use crate::core_editor::graphemes::next_grapheme_boundary;
 use crate::core_editor::{commit, locate, Boundary, End, RestPolicy, SetSelection};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
-use crate::MotionTarget;
 use crate::{core_editor::get_local_clipboard, EditCommand};
+use crate::{Direction, MotionTarget, WordEdge};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
 
@@ -304,7 +305,22 @@ impl Editor {
 
     fn motion_range(&self, target: MotionTarget) -> Range<usize> {
         let origin = self.insertion_point();
-        let dest = locate(self.line_buffer.get_buffer(), origin, target.into());
+        let buffer = self.line_buffer.get_buffer();
+        let mut dest = locate(buffer, origin, target.into());
+        // Operating *to a word end* is inclusive of that grapheme (vi `de`/`cw`):
+        // the bare motion lands the cursor on the word's last char, but the
+        // operator must consume it, so the range runs one grapheme further.
+        if matches!(
+            target,
+            MotionTarget::Word {
+                edge: WordEdge::End,
+                direction: Direction::Forward,
+                ..
+            }
+        ) && dest >= origin
+        {
+            dest = next_grapheme_boundary(buffer, dest);
+        }
         origin.min(dest)..origin.max(dest)
     }
 
@@ -2480,5 +2496,34 @@ mod test {
         assert_eq!(editor.get_buffer(), "bar baz");
         assert_eq!(editor.insertion_point(), 0);
         assert_eq!(editor.cut_buffer.get().0, ""); // register left untouched
+    }
+
+    /// `e` as a target: small-word end, forward.
+    fn word_end_fwd() -> MotionTarget {
+        MotionTarget::Word {
+            kind: WordKind::Small,
+            edge: WordEdge::End,
+            direction: Direction::Forward,
+        }
+    }
+
+    #[test]
+    fn move_word_end_lands_on_last_char_exclusive() {
+        // The bare `e` motion lands the cursor *on* the word's last char.
+        let mut editor = editor_with("foo bar");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Move(word_end_fwd()));
+        assert_eq!(editor.insertion_point(), 2); // on the second 'o', not past it
+    }
+
+    #[test]
+    fn cut_word_end_is_inclusive_of_last_char() {
+        // vi `de`: same target as `e`, but the operator *consumes* the char the
+        // motion lands on — so `de` from the start of "foo" deletes all of "foo".
+        let mut editor = editor_with("foo bar");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Cut(word_end_fwd()));
+        assert_eq!(editor.get_buffer(), " bar");
+        assert_eq!(editor.cut_buffer.get().0, "foo");
     }
 }

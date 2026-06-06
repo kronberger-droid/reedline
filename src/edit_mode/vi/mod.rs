@@ -401,9 +401,13 @@ mod test {
 
         assert_eq!(
             result,
-            ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![
-                EditCommand::CutWordRightToNext,
-            ])]),
+            ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut(
+                MotionTarget::Word {
+                    kind: WordKind::Small,
+                    edge: WordEdge::Start,
+                    direction: Direction::Forward,
+                }
+            )])]),
         );
         assert!(
             vi.cache.is_empty(),
@@ -606,12 +610,14 @@ mod test {
         let _ = vi.parse_event(key(KeyCode::Char('d'), KeyModifiers::NONE));
         let result = vi.parse_event(key(KeyCode::Char('w'), KeyModifiers::NONE));
 
+        let cut_word = ReedlineEvent::Edit(vec![EditCommand::Cut(MotionTarget::Word {
+            kind: WordKind::Small,
+            edge: WordEdge::Start,
+            direction: Direction::Forward,
+        })]);
         assert_eq!(
             result,
-            ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![EditCommand::CutWordRightToNext]),
-                ReedlineEvent::Edit(vec![EditCommand::CutWordRightToNext]),
-            ]),
+            ReedlineEvent::Multiple(vec![cut_word.clone(), cut_word]),
         );
         assert!(vi.cache.is_empty());
     }

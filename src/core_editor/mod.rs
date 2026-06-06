@@ -6,6 +6,7 @@ mod graphemes;
 mod line_buffer;
 mod rest_policy;
 mod set_selection;
+mod word;
 
 #[cfg(feature = "system_clipboard")]
 pub(crate) use clip_buffer::get_system_clipboard;

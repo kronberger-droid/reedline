@@ -13,6 +13,8 @@
 //! — means vi-word, vi-WORD, emacs-word, and helix-word are thin variations over
 //! one definition rather than eight ad-hoc functions.
 
+use crate::core_editor::graphemes::prev_grapheme_boundary;
+
 /// Classification of a character for word-boundary detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // resolver (`locate`) lands in a following commit
@@ -54,6 +56,87 @@ pub(crate) fn is_long_word_boundary(a: char, b: char) -> bool {
             false
         }
         (a, b) => a != b,
+    }
+}
+
+/// Which "word" notion a motion uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // producers land when vi motions are re-lowered
+pub(crate) enum WordKind {
+    /// `w`/`b`/`e` — boundary at any class change ([`is_word_boundary`]).
+    Small,
+    /// `W`/`B`/`E` — boundary only at whitespace/EOL ([`is_long_word_boundary`]).
+    Big,
+}
+
+/// Which edge of the word a forward/backward motion lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // producers land when vi motions are re-lowered
+pub(crate) enum WordEdge {
+    /// First character of the word — `w`/`W` (forward), `b`/`B` (backward).
+    Start,
+    /// Last character of the word, inclusive — `e`/`E` (forward).
+    End,
+}
+
+/// Byte offset of the word boundary reached from `origin`, scanning `forward`
+/// (or backward), using `kind`'s boundary predicate and landing on `edge`.
+///
+/// This is the single resolver the 8 ad-hoc `LineBuffer::*_index` functions
+/// collapse into. The `(forward, edge)` pairs map to vi motions:
+/// - `(true,  Start)` → `w` / `W`   (next word's first char)
+/// - `(true,  End)`   → `e` / `E`   (next word's last char, inclusive)
+/// - `(false, Start)` → `b` / `B`   (previous word's first char)
+#[allow(dead_code)] // producer is the `Boundary::Word` locate arm + re-lowered motions
+pub(crate) fn locate_word(
+    buf: &str,
+    origin: usize,
+    kind: WordKind,
+    edge: WordEdge,
+    forward: bool,
+) -> usize {
+    // The only thing `kind` changes is which transitions count as a boundary.
+    let is_boundary: fn(char, char) -> bool = match kind {
+        WordKind::Small => is_word_boundary,
+        WordKind::Big => is_long_word_boundary,
+    };
+
+    let chars: Vec<(usize, char)> = buf.char_indices().collect();
+
+    // Is char `i` the `edge` of a word? A word excludes whitespace/EOL, so its
+    // `Start` is a non-whitespace char with a boundary on its left (or buffer
+    // start), and its `End` one with a boundary on its right (or buffer end).
+    let is_target = |i: usize| -> bool {
+        let ch = chars[i].1;
+        if ch.is_whitespace() {
+            return false;
+        }
+        match edge {
+            WordEdge::Start => i == 0 || is_boundary(chars[i - 1].1, ch),
+            WordEdge::End => i + 1 == chars.len() || is_boundary(ch, chars[i + 1].1),
+        }
+    };
+
+    if forward {
+        // first target strictly after origin
+        for (i, &(byte, _)) in chars.iter().enumerate() {
+            if byte > origin && is_target(i) {
+                return byte;
+            }
+        }
+        // none: `w` runs to the buffer end; `e` rests on the last grapheme
+        match edge {
+            WordEdge::Start => buf.len(),
+            WordEdge::End => prev_grapheme_boundary(buf, buf.len()),
+        }
+    } else {
+        // nearest target strictly before origin
+        for (i, &(byte, _)) in chars.iter().enumerate().rev() {
+            if byte < origin && is_target(i) {
+                return byte;
+            }
+        }
+        0
     }
 }
 

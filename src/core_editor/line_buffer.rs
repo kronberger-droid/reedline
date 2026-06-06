@@ -1962,6 +1962,98 @@ mod test {
         assert_eq!(index, expected);
     }
 
+    // --- diff-harness: `word::locate_word` vs the legacy `*_index` functions ---
+    // The target for the `locate_word` scaffold. These panic on `todo!()` until
+    // the scan is written, then pin that the one resolver reproduces all six
+    // ad-hoc functions. (Where vi-correct rules *should* differ from a legacy
+    // function, change that case here and note it — a deliberate fix, not a match.)
+    use crate::core_editor::word::{locate_word, WordEdge, WordKind};
+
+    fn at(input: &str, pos: usize) -> LineBuffer {
+        let mut lb = buffer_with(input);
+        lb.set_insertion_point(pos);
+        lb
+    }
+
+    #[rstest]
+    #[case("abc def ghi", 0)]
+    #[case("abc-def ghi", 0)]
+    fn locate_word_matches_word_right_start(#[case] s: &str, #[case] p: usize) {
+        assert_eq!(
+            locate_word(s, p, WordKind::Small, WordEdge::Start, true),
+            at(s, p).word_right_start_index()
+        );
+    }
+
+    // vi-correct divergences from the legacy unicode-word functions: vi treats
+    // all punctuation as a word break, but `split_word_bound_indices` keeps
+    // `abc.def` as one word (a `.` between letters is unicode "MidNumLet"). These
+    // are the deliberate fixes the classifier brings — assert the vi value, not
+    // the legacy function's.
+    #[test]
+    fn locate_word_vi_breaks_on_punctuation() {
+        // `w` from start of "abc.def ghi" stops on the `.` (byte 3), not "ghi" (8)
+        assert_eq!(
+            locate_word("abc.def ghi", 0, WordKind::Small, WordEdge::Start, true),
+            3
+        );
+        // `b` from "abc def.ghi" end lands on "ghi"'s start (byte 8), not "def" (4)
+        assert_eq!(
+            locate_word("abc def.ghi", 10, WordKind::Small, WordEdge::Start, false),
+            8
+        );
+    }
+
+    #[rstest]
+    #[case("abc-def ghi", 0)]
+    #[case("abc def ghi", 0)]
+    fn locate_word_matches_big_word_right_start(#[case] s: &str, #[case] p: usize) {
+        assert_eq!(
+            locate_word(s, p, WordKind::Big, WordEdge::Start, true),
+            at(s, p).big_word_right_start_index()
+        );
+    }
+
+    #[rstest]
+    #[case("abc def ghi", 0)]
+    #[case("abc-def ghi", 0)]
+    #[case("abc", 1)]
+    fn locate_word_matches_word_right_end(#[case] s: &str, #[case] p: usize) {
+        assert_eq!(
+            locate_word(s, p, WordKind::Small, WordEdge::End, true),
+            at(s, p).word_right_end_index()
+        );
+    }
+
+    #[rstest]
+    #[case("abc def ghi", 0)]
+    #[case("abc-def ghi", 0)]
+    fn locate_word_matches_big_word_right_end(#[case] s: &str, #[case] p: usize) {
+        assert_eq!(
+            locate_word(s, p, WordKind::Big, WordEdge::End, true),
+            at(s, p).big_word_right_end_index()
+        );
+    }
+
+    #[rstest]
+    #[case("abc def ghi", 10)]
+    fn locate_word_matches_word_left(#[case] s: &str, #[case] p: usize) {
+        assert_eq!(
+            locate_word(s, p, WordKind::Small, WordEdge::Start, false),
+            at(s, p).word_left_index()
+        );
+    }
+
+    #[rstest]
+    #[case("abc def ghi", 10)]
+    #[case("abc def-ghi", 10)]
+    fn locate_word_matches_big_word_left(#[case] s: &str, #[case] p: usize) {
+        assert_eq!(
+            locate_word(s, p, WordKind::Big, WordEdge::Start, false),
+            at(s, p).big_word_left_index()
+        );
+    }
+
     #[rstest]
     #[case("abc def", 0, 3)]
     #[case("abc def ghi", 3, 7)]

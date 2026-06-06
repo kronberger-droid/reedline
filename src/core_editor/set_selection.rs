@@ -1,5 +1,6 @@
 use crate::core_editor::{
     graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
+    word::{self, WordEdge, WordKind},
     Cursor,
 };
 
@@ -19,6 +20,14 @@ pub(crate) enum Boundary {
     GraphemeRight,
     /// One grapheme left of the origin.
     GraphemeLeft,
+    /// A word boundary — vi `w`/`e`/`b` and their `W`/`E`/`B` variants, resolved
+    /// via the shared classifier (see [`word::locate_word`]).
+    #[allow(dead_code)] // producer lands when the word motions are re-lowered
+    Word {
+        kind: WordKind,
+        edge: WordEdge,
+        forward: bool,
+    },
 }
 
 /// Identifies one endpoint of a [`Cursor`].
@@ -108,6 +117,11 @@ pub(crate) fn locate(buf: &str, origin: usize, boundary: Boundary) -> usize {
         Boundary::Offset(n) => n.min(buf.len()),
         Boundary::GraphemeRight => next_grapheme_boundary(buf, origin),
         Boundary::GraphemeLeft => prev_grapheme_boundary(buf, origin),
+        Boundary::Word {
+            kind,
+            edge,
+            forward,
+        } => word::locate_word(buf, origin, kind, edge, forward),
     }
 }
 

@@ -1,3 +1,5 @@
+use crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary};
+
 /// The direction a cursor extends in.
 ///
 /// `Forward` when `head >= anchor`, `Backward` when `head < anchor`.
@@ -148,6 +150,54 @@ impl Cursor {
     /// `true` if `pos` lies inside the range (left-inclusive, right-exclusive).
     pub fn contains(&self, pos: usize) -> bool {
         self.start() <= pos && pos < self.end()
+    }
+
+    /// The visible caret position
+    pub fn caret(&self, buf: &str) -> usize {
+        if self.head > self.anchor {
+            prev_grapheme_boundary(buf, self.head)
+        } else {
+            self.head
+        }
+    }
+
+    /// Move the caret to land on the grapheme at byte `target`, returning the new
+    /// cursor. Mirrors Helix's `Range::put_cursor`.
+    ///
+    /// `extend = false` collapses to a point at `target` (the commit boundary's
+    /// `Block` policy then widens it to a 1-grapheme block). `extend = true`
+    /// keeps the anchor side — but **flips the anchor onto the other edge of its
+    /// grapheme when the selection changes direction**, so the grapheme the
+    /// selection started on stays covered (see the type docs / convergence note).
+    pub fn put_cursor(self, buf: &str, target: usize, extend: bool) -> Self {
+        if !extend {
+            return Self::point(target);
+        }
+
+        // TODO(you): flip the anchor onto the far edge of its grapheme when the
+        // direction changes; otherwise leave it. Three cases:
+        //   - was forward  (head >= anchor) and target crosses before  the anchor
+        //       (target <  anchor) → next_grapheme_boundary(buf, anchor)
+        //   - was backward (head <  anchor) and target crosses to/after the anchor
+        //       (target >= anchor) → prev_grapheme_boundary(buf, anchor)
+        //   - otherwise → self.anchor   (unchanged)
+        let anchor: usize = if self.head >= self.anchor && target < self.anchor {
+            next_grapheme_boundary(buf, self.anchor)
+        } else if self.head < self.anchor && target >= self.anchor {
+            prev_grapheme_boundary(buf, self.anchor)
+        } else {
+            self.anchor
+        };
+
+        // Place the head so `caret()` lands back on `target`'s grapheme:
+        // forward → head on the far edge; backward → head *is* the caret.
+        let head = if anchor <= target {
+            next_grapheme_boundary(buf, target)
+        } else {
+            target
+        };
+
+        Self::new(anchor, head)
     }
 }
 
@@ -428,5 +478,93 @@ mod tests {
     #[test]
     fn default_is_point_at_zero() {
         assert_eq!(Cursor::default(), Cursor::point(0));
+    }
+
+    // --- caret (block-cursor display position) -------------------------------
+
+    #[test]
+    fn caret_of_point_is_head() {
+        assert_eq!(Cursor::point(2).caret("hello"), 2);
+        assert_eq!(Cursor::point(0).caret("hello"), 0);
+    }
+
+    #[test]
+    fn caret_of_forward_block_retreats_one_grapheme() {
+        assert_eq!(Cursor::new(0, 3).caret("hello"), 2);
+    }
+
+    #[test]
+    fn caret_of_backward_range_is_head() {
+        assert_eq!(Cursor::new(5, 2).caret("hello"), 2);
+    }
+
+    #[test]
+    fn caret_retreats_past_multibyte_grapheme() {
+        assert_eq!(Cursor::new(0, 5).caret("café"), 3);
+    }
+
+    #[test]
+    fn caret_retreats_past_zwj_emoji_as_one() {
+        let buf = "a👨‍👩‍👧";
+        assert_eq!(Cursor::new(0, buf.len()).caret(buf), 1);
+    }
+
+    #[test]
+    fn caret_of_empty_buffer_point_is_zero() {
+        assert_eq!(Cursor::point(0).caret(""), 0);
+    }
+
+    // --- put_cursor (block-cursor caret placement) ---------------------------
+
+    #[test]
+    fn put_cursor_non_extend_collapses_to_point() {
+        assert_eq!(
+            Cursor::new(2, 4).put_cursor("hello", 3, false),
+            Cursor::point(3)
+        );
+    }
+
+    #[test]
+    fn put_cursor_extend_forward_places_head_on_far_edge() {
+        // [0,1) extend to byte 2 → [0,3); caret retreats to 2 (the 'l')
+        let c = Cursor::new(0, 1).put_cursor("hello", 2, true);
+        assert_eq!(c, Cursor::new(0, 3));
+        assert_eq!(c.caret("hello"), 2);
+    }
+
+    #[test]
+    fn put_cursor_extend_no_flip_stays_backward() {
+        // backward [4,2) extend further left to 1, no crossing → [4,1)
+        let c = Cursor::new(4, 2).put_cursor("hello", 1, true);
+        assert_eq!(c, Cursor::new(4, 1));
+        assert_eq!(c.caret("hello"), 1);
+    }
+
+    #[test]
+    fn put_cursor_extend_flip_forward_to_backward_keeps_anchor_grapheme() {
+        // the worked example: [2,4) drag caret to 0 → anchor hops 2→3 → [3,0),
+        // so the 'l' at byte 2 (the start grapheme) stays covered.
+        let c = Cursor::new(2, 4).put_cursor("hello", 0, true);
+        assert_eq!(c, Cursor::new(3, 0));
+        assert_eq!(c.caret("hello"), 0);
+        assert!(c.contains(2)); // start grapheme survived the turn
+    }
+
+    #[test]
+    fn put_cursor_extend_flip_backward_to_forward_keeps_anchor_grapheme() {
+        // backward [4,2) drag caret right to 5 → anchor hops 4→3 → [3,5)
+        let c = Cursor::new(4, 2).put_cursor("hello", 5, true);
+        assert_eq!(c, Cursor::new(3, 5));
+        assert_eq!(c.caret("hello"), 4);
+        assert!(c.contains(3)); // the 'l' at 3 (start grapheme) survived
+    }
+
+    #[test]
+    fn put_cursor_extend_flip_across_multibyte_anchor() {
+        // "café": é is [3,5). forward [3,5) (on é) drag caret to 0 → anchor hops
+        // 3→5 (far edge of é) → [5,0); the whole é stays covered.
+        let c = Cursor::new(3, 5).put_cursor("café", 0, true);
+        assert_eq!(c, Cursor::new(5, 0));
+        assert!(c.contains(3) && c.contains(4)); // both bytes of é covered
     }
 }

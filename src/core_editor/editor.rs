@@ -2,11 +2,11 @@ use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer}
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::next_grapheme_boundary;
-use crate::core_editor::{commit, locate, Boundary, RestPolicy, SetSelection};
+use crate::core_editor::{commit, locate, resolve_motion, Boundary, RestPolicy, SetSelection};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
+use crate::MotionTarget;
 use crate::{core_editor::get_local_clipboard, EditCommand};
-use crate::{Direction, MotionTarget, WordEdge};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
 
@@ -81,8 +81,14 @@ impl Editor {
             }
             EditCommand::MoveWordRightEnd { select } => self.move_word_right_end(*select),
             EditCommand::MoveBigWordRightEnd { select } => self.move_big_word_right_end(*select),
-            EditCommand::Move(t) => self.set_selection(SetSelection::motion((*t).into(), false)),
-            EditCommand::Extend(t) => self.set_selection(SetSelection::motion((*t).into(), true)),
+            EditCommand::Move(t) => {
+                let head = self.resolve_head(*t);
+                self.apply_resolved(SetSelection::motion(head, false));
+            }
+            EditCommand::Extend(t) => {
+                let head = self.resolve_head(*t);
+                self.apply_resolved(SetSelection::motion(head, true));
+            }
             EditCommand::Cut(t) => {
                 let range = self.motion_range(*t);
                 self.cut_range(range);
@@ -303,37 +309,48 @@ impl Editor {
         self.line_buffer.move_head(position, select);
     }
 
+    /// Resolve a motion target to the head position the cursor would land on.
+    fn resolve_head(&self, target: MotionTarget) -> usize {
+        resolve_motion(
+            self.line_buffer.get_buffer(),
+            self.insertion_point(),
+            target,
+        )
+        .head
+    }
+
+    /// The buffer range an operator (`Cut`/`Copy`/`Erase`) acts on for a motion
+    /// target, ascending. An inclusive motion (e.g. a forward word end) consumes
+    /// the grapheme it lands on, so the range runs one grapheme past it — the
+    /// inclusivity is data the resolver reports, not a per-target special case.
     fn motion_range(&self, target: MotionTarget) -> Range<usize> {
         let origin = self.insertion_point();
         let buffer = self.line_buffer.get_buffer();
-        let mut dest = locate(buffer, origin, target.into());
-        // Operating *to a word end* is inclusive of that grapheme (vi `de`/`cw`):
-        // the bare motion lands the cursor on the word's last char, but the
-        // operator must consume it, so the range runs one grapheme further.
-        if matches!(
-            target,
-            MotionTarget::Word {
-                edge: WordEdge::End,
-                direction: Direction::Forward,
-                ..
-            }
-        ) && dest >= origin
-        {
-            dest = next_grapheme_boundary(buffer, dest);
-        }
+        let m = resolve_motion(buffer, origin, target);
+        let dest = if m.inclusive {
+            next_grapheme_boundary(buffer, m.head)
+        } else {
+            m.head
+        };
         origin.min(dest)..origin.max(dest)
     }
 
-    /// Resolve and apply a [`SetSelection`], then normalize at the commit
-    /// boundary. Boundaries resolve relative to the current head; both endpoints
-    /// then commit from the pre-transform snapshot (see [`Cursor::transform`]).
-    ///
-    /// This is the single primitive motions and selection ops lower to. Re-lower
-    /// a motion (e.g. `move_right`/`move_left`) through here to give it a caller.
+    /// Resolve a [`Boundary`]-typed [`SetSelection`] relative to the current
+    /// head, then apply it. Used by the grapheme/line motions that still speak
+    /// `Boundary`; the `MotionTarget` verbs resolve via [`resolve_motion`] and
+    /// call [`apply_resolved`](Self::apply_resolved) directly.
     fn set_selection(&mut self, op: SetSelection<Boundary>) {
-        let was_empty = self.line_buffer.selection_anchor().is_none();
         let head = self.insertion_point();
         let resolved = op.resolve(|b| locate(self.line_buffer.get_buffer(), head, b));
+        self.apply_resolved(resolved);
+    }
+
+    /// Apply an already-resolved [`SetSelection`], then normalize at the commit
+    /// boundary. Both endpoints commit from the pre-transform snapshot (see
+    /// [`Cursor::transform`]). The single sink every motion/selection op funnels
+    /// through, whether its endpoints came from a `Boundary` or a `MotionTarget`.
+    fn apply_resolved(&mut self, resolved: SetSelection<usize>) {
+        let was_empty = self.line_buffer.selection_anchor().is_none();
         let next = self.line_buffer.cursor().transform(resolved);
         self.line_buffer.set_cursor(next);
         self.commit_cursor();

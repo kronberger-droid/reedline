@@ -3,7 +3,7 @@ use crate::{
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
         word, Cursor,
     },
-    enums::{MotionTarget, WordEdge, WordKind},
+    enums::{Direction, MotionTarget, WordEdge, WordKind},
 };
 
 /// A target an endpoint can move to, resolved against an origin (the head).
@@ -90,11 +90,16 @@ impl SetSelection<Boundary> {
             head: self.head.resolve(&locate),
         }
     }
+}
 
-    pub(crate) fn motion(boundary: Boundary, extend: bool) -> Self {
+impl<B: Copy> SetSelection<B> {
+    /// A motion to `target`: collapse onto it, or keep the anchor when extending.
+    /// Generic over the endpoint type so it serves both an unresolved
+    /// [`Boundary`] and an already-resolved `usize` head.
+    pub(crate) fn motion(target: B, extend: bool) -> Self {
         SetSelection {
-            anchor: if extend { End::Keep } else { End::To(boundary) },
-            head: End::To(boundary),
+            anchor: if extend { End::Keep } else { End::To(target) },
+            head: End::To(target),
         }
     }
 }
@@ -134,26 +139,59 @@ pub(crate) fn locate(buf: &str, origin: usize, boundary: Boundary) -> usize {
     }
 }
 
-impl From<MotionTarget> for Boundary {
-    fn from(value: MotionTarget) -> Self {
-        use crate::enums::Direction::{Backward, Forward};
-        match value {
-            MotionTarget::Grapheme(Forward) => Boundary::GraphemeRight,
-            MotionTarget::Grapheme(Backward) => Boundary::GraphemeLeft,
-            MotionTarget::Word {
-                kind,
-                edge,
-                direction,
-            } => Boundary::Word {
-                kind,
-                edge,
-                forward: direction == Forward,
-            },
-            MotionTarget::Offset(n) => Boundary::Offset(n),
-            MotionTarget::LineEdge(_) | MotionTarget::BufferEdge(_) | MotionTarget::Find { .. } => {
-                todo!()
-            }
+/// A resolved motion: where the cursor head lands, and whether an operator
+/// acting over it consumes the grapheme at `head`.
+///
+/// `inclusive` is vim's inclusive-vs-exclusive *motion* classification — a
+/// property of the motion itself (e.g. a word *end* is inclusive), which
+/// operators honor. The cursor lands on `head` either way; only an operator's
+/// range extends one grapheme further when `inclusive`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Movement {
+    pub(crate) head: usize,
+    pub(crate) inclusive: bool,
+}
+
+/// Resolve a public [`MotionTarget`] against `buf`, relative to `origin`.
+///
+/// Total over every variant — a target with no resolution yet (`Find`) stays at
+/// `origin` (a no-op) rather than panicking, so a target constructed from config
+/// or another mode can never crash the editor. Context-aware (takes `buf`), so
+/// line/buffer edges resolve correctly where a context-free conversion couldn't.
+pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> Movement {
+    let exclusive = |head| Movement {
+        head,
+        inclusive: false,
+    };
+    match target {
+        MotionTarget::Grapheme(Direction::Forward) => {
+            exclusive(next_grapheme_boundary(buf, origin))
         }
+        MotionTarget::Grapheme(Direction::Backward) => {
+            exclusive(prev_grapheme_boundary(buf, origin))
+        }
+        MotionTarget::Word {
+            kind,
+            edge,
+            direction,
+        } => Movement {
+            head: word::locate_word(buf, origin, kind, edge, direction == Direction::Forward),
+            // A word *end* is the word's last grapheme; operating to it consumes
+            // that grapheme (vim classifies `e`/`E` as inclusive).
+            inclusive: edge == WordEdge::End && direction == Direction::Forward,
+        },
+        MotionTarget::Offset(n) => exclusive(n.min(buf.len())),
+        MotionTarget::BufferEdge(Direction::Backward) => exclusive(0),
+        MotionTarget::BufferEdge(Direction::Forward) => exclusive(buf.len()),
+        MotionTarget::LineEdge(Direction::Backward) => {
+            exclusive(buf[..origin].rfind('\n').map_or(0, |i| i + 1))
+        }
+        MotionTarget::LineEdge(Direction::Forward) => {
+            exclusive(buf[origin..].find('\n').map_or(buf.len(), |i| origin + i))
+        }
+        // Character search is not yet lowered through `MotionTarget`; vi `f`/`t`
+        // use the dedicated `MoveRightUntil`/… path. No-op rather than panic.
+        MotionTarget::Find { .. } => exclusive(origin),
     }
 }
 
@@ -204,5 +242,74 @@ mod tests {
         assert_eq!(locate(buf, 3, Boundary::GraphemeRight), 5); // over the 2-byte é
         assert_eq!(locate(buf, 3, Boundary::GraphemeLeft), 2);
         assert_eq!(locate(buf, 0, Boundary::Offset(99)), 5); // clamped to len
+    }
+
+    fn word(edge: WordEdge, direction: Direction) -> MotionTarget {
+        MotionTarget::Word {
+            kind: WordKind::Small,
+            edge,
+            direction,
+        }
+    }
+
+    #[test]
+    fn resolve_motion_marks_forward_word_end_inclusive() {
+        // Only a forward word *end* is inclusive; starts and backward motions are not.
+        let m = resolve_motion("foo bar", 0, word(WordEdge::End, Direction::Forward));
+        assert_eq!(
+            m,
+            Movement {
+                head: 2,
+                inclusive: true
+            }
+        ); // on the last 'o'
+        let m = resolve_motion("foo bar", 0, word(WordEdge::Start, Direction::Forward));
+        assert!(!m.inclusive);
+        let m = resolve_motion("foo bar", 7, word(WordEdge::End, Direction::Backward));
+        assert!(!m.inclusive);
+    }
+
+    #[test]
+    fn resolve_motion_handles_line_and_buffer_edges() {
+        let buf = "ab\ncd\nef";
+        // line edges resolve against the *current* line (context-aware)
+        assert_eq!(
+            resolve_motion(buf, 4, MotionTarget::LineEdge(Direction::Backward)).head,
+            3
+        );
+        assert_eq!(
+            resolve_motion(buf, 4, MotionTarget::LineEdge(Direction::Forward)).head,
+            5
+        );
+        assert_eq!(
+            resolve_motion(buf, 4, MotionTarget::BufferEdge(Direction::Backward)).head,
+            0
+        );
+        assert_eq!(
+            resolve_motion(buf, 4, MotionTarget::BufferEdge(Direction::Forward)).head,
+            8
+        );
+    }
+
+    #[test]
+    fn resolve_motion_is_total_no_panic_on_unwired() {
+        // A `Find` target is not lowered yet; it must no-op (stay at origin),
+        // never panic — it is reachable from public/config construction.
+        let m = resolve_motion(
+            "foo bar",
+            3,
+            MotionTarget::Find {
+                ch: 'r',
+                direction: Direction::Forward,
+                stop: crate::enums::FindStop::On,
+            },
+        );
+        assert_eq!(
+            m,
+            Movement {
+                head: 3,
+                inclusive: false
+            }
+        );
     }
 }

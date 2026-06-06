@@ -15,4 +15,4 @@ pub(crate) use cursor::Cursor;
 pub use editor::Editor;
 pub use line_buffer::LineBuffer;
 pub(crate) use rest_policy::{commit, RestPolicy};
-pub(crate) use set_selection::{locate, Boundary, SetSelection};
+pub(crate) use set_selection::{locate, resolve_motion, Boundary, SetSelection};

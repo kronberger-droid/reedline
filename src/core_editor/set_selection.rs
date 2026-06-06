@@ -1,8 +1,10 @@
-use crate::core_editor::{
-    graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
-    word, Cursor,
+use crate::{
+    core_editor::{
+        graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
+        word, Cursor,
+    },
+    enums::{MotionTarget, WordEdge, WordKind},
 };
-use crate::enums::{WordEdge, WordKind};
 
 /// A target an endpoint can move to, resolved against an origin (the head).
 ///
@@ -88,6 +90,13 @@ impl SetSelection<Boundary> {
             head: self.head.resolve(&locate),
         }
     }
+
+    pub(crate) fn motion(boundary: Boundary, extend: bool) -> Self {
+        SetSelection {
+            anchor: if extend { End::Keep } else { End::To(boundary) },
+            head: End::To(boundary),
+        }
+    }
 }
 
 impl Cursor {
@@ -122,6 +131,29 @@ pub(crate) fn locate(buf: &str, origin: usize, boundary: Boundary) -> usize {
             edge,
             forward,
         } => word::locate_word(buf, origin, kind, edge, forward),
+    }
+}
+
+impl From<MotionTarget> for Boundary {
+    fn from(value: MotionTarget) -> Self {
+        use crate::enums::Direction::{Backward, Forward};
+        match value {
+            MotionTarget::Grapheme(Forward) => Boundary::GraphemeRight,
+            MotionTarget::Grapheme(Backward) => Boundary::GraphemeLeft,
+            MotionTarget::Word {
+                kind,
+                edge,
+                direction,
+            } => Boundary::Word {
+                kind,
+                edge,
+                forward: direction == Forward,
+            },
+            MotionTarget::Offset(n) => Boundary::Offset(n),
+            MotionTarget::LineEdge(_) | MotionTarget::BufferEdge(_) | MotionTarget::Find { .. } => {
+                todo!()
+            }
+        }
     }
 }
 

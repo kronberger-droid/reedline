@@ -4,6 +4,7 @@ use crate::core_editor::get_system_clipboard;
 use crate::core_editor::{commit, locate, Boundary, End, RestPolicy, SetSelection};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
+use crate::MotionTarget;
 use crate::{core_editor::get_local_clipboard, EditCommand};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
@@ -79,14 +80,20 @@ impl Editor {
             }
             EditCommand::MoveWordRightEnd { select } => self.move_word_right_end(*select),
             EditCommand::MoveBigWordRightEnd { select } => self.move_big_word_right_end(*select),
-            // PR #4 step 2: lower these through `MotionTarget::lower` → `SetSelection`.
-            // Stubbed until the lowering lands so the type/keymap work compiles.
-            EditCommand::Move(_)
-            | EditCommand::Extend(_)
-            | EditCommand::Cut(_)
-            | EditCommand::Copy(_)
-            | EditCommand::Erase(_) => {
-                todo!("PR #4 step 2: lower MotionTarget through SetSelection")
+            EditCommand::Move(t) => self.set_selection(SetSelection::motion((*t).into(), false)),
+            EditCommand::Extend(t) => self.set_selection(SetSelection::motion((*t).into(), true)),
+            EditCommand::Cut(t) => {
+                let range = self.motion_range(*t);
+                self.cut_range(range);
+            }
+            EditCommand::Copy(t) => {
+                let range = self.motion_range(*t);
+                self.copy_range(range);
+            }
+            EditCommand::Erase(t) => {
+                let range = self.motion_range(*t);
+                self.line_buffer.clear_range_safe(range.clone());
+                self.line_buffer.set_insertion_point(range.start);
             }
             EditCommand::InsertChar(c) => self.insert_char(*c),
             EditCommand::Complete => {}
@@ -293,6 +300,12 @@ impl Editor {
     fn move_to_position(&mut self, position: usize, select: bool) {
         self.note_selection_inclusivity_if_planting(select);
         self.line_buffer.move_head(position, select);
+    }
+
+    fn motion_range(&self, target: MotionTarget) -> Range<usize> {
+        let origin = self.insertion_point();
+        let dest = locate(self.line_buffer.get_buffer(), origin, target.into());
+        origin.min(dest)..origin.max(dest)
     }
 
     /// Resolve and apply a [`SetSelection`], then normalize at the commit
@@ -1222,6 +1235,7 @@ fn insert_clipboard_content_before(line_buffer: &mut LineBuffer, clipboard: &mut
 mod test {
     use super::*;
     use crate::prompt::PromptViMode;
+    use crate::{Direction, WordEdge, WordKind};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
@@ -2379,5 +2393,92 @@ mod test {
 
         assert_eq!(bracket_result, expected_bracket);
         assert_eq!(quote_result, expected_quote);
+    }
+
+    // --- MotionTarget verbs (Move / Extend / Cut / Copy / Erase) ---
+    //
+    // These drive the public verbs through the full lowering
+    // (`MotionTarget` -> `Boundary` -> `locate`) in the default (emacs)
+    // editor, proving the substrate in isolation before any keymap emits it.
+
+    /// `w` as a target: small-word start, forward.
+    fn word_start_fwd() -> MotionTarget {
+        MotionTarget::Word {
+            kind: WordKind::Small,
+            edge: WordEdge::Start,
+            direction: Direction::Forward,
+        }
+    }
+
+    #[test]
+    fn move_word_forward_lands_on_next_word_start() {
+        let mut editor = editor_with("foo bar baz");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Move(word_start_fwd()));
+        assert_eq!(editor.insertion_point(), 4);
+        assert_eq!(editor.get_selection(), None); // Move collapses — no selection
+    }
+
+    #[test]
+    fn move_grapheme_right_steps_over_multibyte() {
+        let mut editor = editor_with("café"); // 'é' is 2 bytes: graphemes at 0,1,2,3, len 5
+        editor.move_to_position(3, false);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::Grapheme(
+            Direction::Forward,
+        )));
+        assert_eq!(editor.insertion_point(), 5); // one grapheme, two bytes
+    }
+
+    #[test]
+    fn extend_word_forward_keeps_anchor_at_origin() {
+        let mut editor = editor_with("foo bar baz");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Extend(word_start_fwd()));
+        assert_eq!(editor.insertion_point(), 4);
+        assert_eq!(editor.get_selection(), Some((0, 4))); // anchor stays at the origin
+    }
+
+    #[test]
+    fn cut_word_forward_removes_range_and_yanks() {
+        let mut editor = editor_with("foo bar baz");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Cut(word_start_fwd()));
+        assert_eq!(editor.get_buffer(), "bar baz");
+        assert_eq!(editor.insertion_point(), 0);
+        assert_eq!(editor.cut_buffer.get().0, "foo ");
+    }
+
+    #[test]
+    fn cut_word_backward_removes_preceding_word() {
+        let mut editor = editor_with("foo bar");
+        editor.move_to_position(7, false); // end of buffer
+        editor.run_edit_command(&EditCommand::Cut(MotionTarget::Word {
+            kind: WordKind::Small,
+            edge: WordEdge::Start,
+            direction: Direction::Backward,
+        }));
+        assert_eq!(editor.get_buffer(), "foo ");
+        assert_eq!(editor.insertion_point(), 4); // cursor lands at the range start
+        assert_eq!(editor.cut_buffer.get().0, "bar");
+    }
+
+    #[test]
+    fn copy_word_forward_yanks_without_editing() {
+        let mut editor = editor_with("foo bar");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Copy(word_start_fwd()));
+        assert_eq!(editor.get_buffer(), "foo bar"); // buffer untouched
+        assert_eq!(editor.insertion_point(), 0); // cursor untouched
+        assert_eq!(editor.cut_buffer.get().0, "foo ");
+    }
+
+    #[test]
+    fn erase_word_forward_deletes_without_touching_register() {
+        let mut editor = editor_with("foo bar baz");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Erase(word_start_fwd()));
+        assert_eq!(editor.get_buffer(), "bar baz");
+        assert_eq!(editor.insertion_point(), 0);
+        assert_eq!(editor.cut_buffer.get().0, ""); // register left untouched
     }
 }

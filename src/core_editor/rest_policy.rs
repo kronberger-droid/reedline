@@ -22,9 +22,11 @@ pub(crate) enum RestPolicy {
     /// back onto the final grapheme. Vi normal mode — the cursor invariant
     /// enforced structurally here instead of by a maintenance command.
     OnGrapheme,
-    /// A point cursor is widened to cover one grapheme on the head side (a 1-wide
-    /// block). Helix — mirrors `Range::min_width_1`. No producer until helix mode
-    /// lands, so it is intentionally unconstructed for now.
+    /// The resting cursor always covers exactly one grapheme: a point is widened
+    /// onto the grapheme to its right, or — at the buffer end, where there is
+    /// none — onto the grapheme to its left. Mirrors Helix's `Range::min_width_1`.
+    /// Vi normal / Helix. No producer until those modes are wired, so it is
+    /// intentionally unconstructed for now.
     #[allow(dead_code)]
     Block,
 }
@@ -86,8 +88,22 @@ pub(crate) fn commit(buf: &str, c: Cursor, policy: RestPolicy) -> Cursor {
             }
         }
         RestPolicy::Block => {
+            // A block cursor always covers exactly one grapheme. Only a resting
+            // *point* needs adjusting; an existing selection is already a range.
             if c.is_empty() {
-                c.move_head(next_grapheme_boundary(buf, c.head()))
+                let head = c.head();
+                let next = next_grapheme_boundary(buf, head);
+                if next > head {
+                    // widen forward onto the grapheme to the right: [head, next)
+                    c.move_head(next)
+                } else if head > 0 {
+                    // at the buffer end there's nothing to the right, so cover the
+                    // last grapheme instead: [prev, head)
+                    Cursor::new(prev_grapheme_boundary(buf, head), head)
+                } else {
+                    // empty buffer: nothing to cover
+                    c
+                }
             } else {
                 c
             }
@@ -226,11 +242,21 @@ mod tests {
     }
 
     #[test]
-    fn block_point_at_end_stays_empty() {
-        // can't widen past the buffer end
+    fn block_point_at_end_widens_backward() {
+        // no grapheme to the right at the end, so the block covers the last one:
+        // point(5) → [4,5), caret on the 'o'
         assert_eq!(
             commit("hello", Cursor::point(5), RestPolicy::Block),
-            Cursor::point(5)
+            Cursor::new(4, 5)
+        );
+    }
+
+    #[test]
+    fn block_widens_backward_over_multibyte_at_end() {
+        // "café": point at end (5) → block covers the 2-byte é → [3,5)
+        assert_eq!(
+            commit("caf\u{e9}", Cursor::point(5), RestPolicy::Block),
+            Cursor::new(3, 5)
         );
     }
 

@@ -203,6 +203,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Direction, MotionTarget, WordEdge, WordKind};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
@@ -491,9 +492,9 @@ mod tests {
                 ReedlineEvent::Up,
             ])]))]
     #[case(&['w'],
-        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::MoveWordRightStart{select:false}])]))]
+        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Move(MotionTarget::Word { kind: WordKind::Small, edge: WordEdge::Start, direction: Direction::Forward })])]))]
     #[case(&['W'],
-        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::MoveBigWordRightStart{select:false}])]))]
+        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Move(MotionTarget::Word { kind: WordKind::Big, edge: WordEdge::Start, direction: Direction::Forward })])]))]
     #[case(&['2', 'l'], ReedlineEvent::Multiple(vec![
         ReedlineEvent::UntilFound(vec![
                 ReedlineEvent::HistoryHintComplete,
@@ -622,9 +623,9 @@ mod tests {
             ])]))]
     #[case(&['k'], ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::MoveLineUp { select: true }])]))]
     #[case(&['w'],
-        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::MoveWordRightStart{select:true}])]))]
+        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Extend(MotionTarget::Word { kind: WordKind::Small, edge: WordEdge::Start, direction: Direction::Forward })])]))]
     #[case(&['W'],
-        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::MoveBigWordRightStart{select:true}])]))]
+        ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Extend(MotionTarget::Word { kind: WordKind::Big, edge: WordEdge::Start, direction: Direction::Forward })])]))]
     #[case(&['2', 'l'], ReedlineEvent::Multiple(vec![
         ReedlineEvent::UntilFound(vec![
                 ReedlineEvent::HistoryHintComplete,

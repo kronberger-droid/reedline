@@ -1,6 +1,9 @@
 use std::iter::Peekable;
 
-use crate::{edit_mode::vi::ViMode, EditCommand, ReedlineEvent, Vi};
+use crate::{
+    edit_mode::vi::ViMode, Direction, EditCommand, MotionTarget, ReedlineEvent, Vi, WordEdge,
+    WordKind,
+};
 
 use super::parser::{ParseResult, ReedlineOption};
 
@@ -163,6 +166,41 @@ pub enum Motion {
 }
 
 impl Motion {
+    /// The [`MotionTarget`] this motion resolves to, for motions expressible in
+    /// the new parameterized vocabulary.
+    ///
+    /// `None` for motions not yet lowered (line moves, char search, up/down) —
+    /// those keep their existing per-variant `EditCommand` lowering. Both the
+    /// bare-motion path (`Move`/`Extend`) and the operator path (`Cut`/`Copy`)
+    /// read this one mapping, so the vi-word semantics live in a single place.
+    fn target(&self) -> Option<MotionTarget> {
+        // A word target, spelled compactly.
+        let word = |kind: WordKind, edge: WordEdge, direction: Direction| MotionTarget::Word {
+            kind,
+            edge,
+            direction,
+        };
+
+        match self {
+            // `w` / `W` — start of the next word, forward.
+            Motion::NextWord => Some(word(WordKind::Small, WordEdge::Start, Direction::Forward)),
+            Motion::NextBigWord => Some(word(WordKind::Big, WordEdge::Start, Direction::Forward)),
+            // `e` / `E` — end of the next word, forward.
+            Motion::NextWordEnd => Some(word(WordKind::Small, WordEdge::End, Direction::Forward)),
+            Motion::NextBigWordEnd => Some(word(WordKind::Big, WordEdge::End, Direction::Forward)),
+            // `b` / `B` — start of the previous word, backward.
+            Motion::PreviousWord => {
+                Some(word(WordKind::Small, WordEdge::Start, Direction::Backward))
+            }
+            Motion::PreviousBigWord => {
+                Some(word(WordKind::Big, WordEdge::Start, Direction::Backward))
+            }
+
+            // Not yet lowered — keep the existing per-variant EditCommand path.
+            _ => None,
+        }
+    }
+
     pub fn to_reedline(&self, vi_state: &mut Vi) -> Vec<ReedlineOption> {
         let select_mode = vi_state.mode == ViMode::Visual;
         match self {
@@ -195,26 +233,24 @@ impl Motion {
                     ReedlineEvent::Down,
                 ]))
             }],
-            Motion::NextWord => vec![ReedlineOption::Edit(EditCommand::MoveWordRightStart {
-                select: select_mode,
-            })],
-            Motion::NextBigWord => vec![ReedlineOption::Edit(EditCommand::MoveBigWordRightStart {
-                select: select_mode,
-            })],
-            Motion::NextWordEnd => vec![ReedlineOption::Edit(EditCommand::MoveWordRightEnd {
-                select: select_mode,
-            })],
-            Motion::NextBigWordEnd => {
-                vec![ReedlineOption::Edit(EditCommand::MoveBigWordRightEnd {
-                    select: select_mode,
-                })]
+            // Word motions all collapse to one dispatch: resolve the target (see
+            // `Motion::target`), then move or extend depending on visual mode.
+            Motion::NextWord
+            | Motion::NextBigWord
+            | Motion::NextWordEnd
+            | Motion::NextBigWordEnd
+            | Motion::PreviousWord
+            | Motion::PreviousBigWord => {
+                let target = self
+                    .target()
+                    .expect("word motions resolve to a MotionTarget");
+                let edit = if select_mode {
+                    EditCommand::Extend(target)
+                } else {
+                    EditCommand::Move(target)
+                };
+                vec![ReedlineOption::Edit(edit)]
             }
-            Motion::PreviousWord => vec![ReedlineOption::Edit(EditCommand::MoveWordLeft {
-                select: select_mode,
-            })],
-            Motion::PreviousBigWord => vec![ReedlineOption::Edit(EditCommand::MoveBigWordLeft {
-                select: select_mode,
-            })],
             Motion::Line => vec![], // Placeholder as unusable standalone motion
             Motion::Start => vec![ReedlineOption::Edit(EditCommand::MoveToLineStart {
                 select: select_mode,

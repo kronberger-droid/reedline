@@ -252,7 +252,11 @@ impl Reedline {
         let history = Box::<FileBackedHistory>::default();
         let painter = Painter::new(std::io::BufWriter::new(std::io::stderr()));
         let buffer_highlighter = Box::<ExampleHighlighter>::default();
-        let visual_selection_style = Style::new().on(Color::LightGray);
+        // A background-only selection style is composited over the syntax
+        // highlighting (see `with_visual_selection_style`): the text keeps its own
+        // colors, only the background is tinted. A neutral dark grey reads on top
+        // of typical syntax foregrounds.
+        let visual_selection_style = Style::new().on(Color::Rgb(74, 78, 84));
         let completer = Box::<DefaultCompleter>::default();
         let hinter = None;
         let validator = None;
@@ -476,7 +480,12 @@ impl Reedline {
         self
     }
 
-    /// A builder that configures the style used for visual selection
+    /// A builder that configures the style used for visual selection.
+    ///
+    /// A background-only style (e.g. `Style::new().on(color)`) is *composited*
+    /// over the syntax highlighting — the selected text keeps its own foreground
+    /// and attributes, only the background is tinted. A style that sets a
+    /// foreground or uses `reverse()` *replaces* the style over the selection.
     #[must_use]
     pub fn with_visual_selection_style(mut self, style: Style) -> Self {
         self.visual_selection_style = style;
@@ -2054,7 +2063,22 @@ impl Reedline {
             .highlighter
             .highlight(buffer_to_paint, cursor_position_in_buffer);
         if let Some((from, to)) = self.editor.get_selection() {
-            styled_text.style_range(from, to, self.visual_selection_style);
+            let sel = self.visual_selection_style;
+            // A style that *only* sets a background composites over the syntax
+            // (tint, keeping each token's fg/attrs). Anything richer — a
+            // foreground, an attribute (bold/underline/…), or `reverse` — is
+            // applied by replacing, so `reverse()` and opaque blocks work and no
+            // requested styling is silently dropped by the overlay merge.
+            let is_background_only = Style {
+                background: None,
+                ..sel
+            }
+            .is_plain();
+            if is_background_only {
+                styled_text.overlay_range(from, to, sel);
+            } else {
+                styled_text.style_range(from, to, sel);
+            }
         }
 
         let (before_cursor, after_cursor) = styled_text.render_around_insertion_point(

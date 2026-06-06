@@ -1,8 +1,8 @@
 use crate::core_editor::{
     graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
-    word::{self, WordEdge, WordKind},
-    Cursor,
+    word, Cursor,
 };
+use crate::enums::{WordEdge, WordKind};
 
 /// A target an endpoint can move to, resolved against an origin (the head).
 ///

@@ -14,6 +14,7 @@
 //! one definition rather than eight ad-hoc functions.
 
 use crate::core_editor::graphemes::prev_grapheme_boundary;
+use crate::enums::{WordEdge, WordKind};
 
 /// Classification of a character for word-boundary detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,26 +58,6 @@ pub(crate) fn is_long_word_boundary(a: char, b: char) -> bool {
         }
         (a, b) => a != b,
     }
-}
-
-/// Which "word" notion a motion uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // producers land when vi motions are re-lowered
-pub(crate) enum WordKind {
-    /// `w`/`b`/`e` — boundary at any class change ([`is_word_boundary`]).
-    Small,
-    /// `W`/`B`/`E` — boundary only at whitespace/EOL ([`is_long_word_boundary`]).
-    Big,
-}
-
-/// Which edge of the word a forward/backward motion lands on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // producers land when vi motions are re-lowered
-pub(crate) enum WordEdge {
-    /// First character of the word — `w`/`W` (forward), `b`/`B` (backward).
-    Start,
-    /// Last character of the word, inclusive — `e`/`E` (forward).
-    End,
 }
 
 /// Byte offset of the word boundary reached from `origin`, scanning `forward`

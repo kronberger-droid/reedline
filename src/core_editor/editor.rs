@@ -79,6 +79,15 @@ impl Editor {
             }
             EditCommand::MoveWordRightEnd { select } => self.move_word_right_end(*select),
             EditCommand::MoveBigWordRightEnd { select } => self.move_big_word_right_end(*select),
+            // PR #4 step 2: lower these through `MotionTarget::lower` → `SetSelection`.
+            // Stubbed until the lowering lands so the type/keymap work compiles.
+            EditCommand::Move(_)
+            | EditCommand::Extend(_)
+            | EditCommand::Cut(_)
+            | EditCommand::Copy(_)
+            | EditCommand::Erase(_) => {
+                todo!("PR #4 step 2: lower MotionTarget through SetSelection")
+            }
             EditCommand::InsertChar(c) => self.insert_char(*c),
             EditCommand::Complete => {}
             EditCommand::InsertString(str) => self.insert_str(str),

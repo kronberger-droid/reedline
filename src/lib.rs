@@ -239,8 +239,9 @@ pub use core_editor::{Editor, LineBuffer};
 
 mod enums;
 pub use enums::{
-    EditCommand, EditCommandDiscriminants, MouseButton, ReedlineEvent, ReedlineEventDiscriminants,
-    ReedlineRawEvent, Signal, TextObject, TextObjectScope, TextObjectType, UndoBehavior,
+    Direction, EditCommand, EditCommandDiscriminants, FindStop, MotionTarget, MouseButton,
+    ReedlineEvent, ReedlineEventDiscriminants, ReedlineRawEvent, Signal, TextObject,
+    TextObjectScope, TextObjectType, UndoBehavior, WordEdge, WordKind,
 };
 
 mod painting;

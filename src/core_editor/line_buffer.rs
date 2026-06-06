@@ -1967,7 +1967,8 @@ mod test {
     // the scan is written, then pin that the one resolver reproduces all six
     // ad-hoc functions. (Where vi-correct rules *should* differ from a legacy
     // function, change that case here and note it — a deliberate fix, not a match.)
-    use crate::core_editor::word::{locate_word, WordEdge, WordKind};
+    use crate::core_editor::word::locate_word;
+    use crate::enums::{WordEdge, WordKind};
 
     fn at(input: &str, pos: usize) -> LineBuffer {
         let mut lb = buffer_with(input);

@@ -29,65 +29,48 @@ impl StyledText {
         self.buffer.push(styled_string);
     }
 
-    /// Style range with the provided style
+    /// Overwrite the style of `[from, to)` with `new_style`, replacing the
+    /// foreground, background, and attributes of any text in that range.
     pub fn style_range(&mut self, from: usize, to: usize, new_style: Style) {
-        let (from, to) = if from > to { (to, from) } else { (from, to) };
-        let mut current_idx = 0;
-        let mut pair_idx = 0;
-        while pair_idx < self.buffer.len() {
-            let pair = &mut self.buffer[pair_idx];
-            let end_idx = current_idx + pair.1.len();
-            enum Position {
-                Before,
-                In,
-                After,
-            }
-            let start_position = if current_idx < from {
-                Position::Before
-            } else if current_idx >= to {
-                Position::After
-            } else {
-                Position::In
-            };
-            let end_position = if end_idx < from {
-                Position::Before
-            } else if end_idx > to {
-                Position::After
-            } else {
-                Position::In
-            };
-            match (start_position, end_position) {
-                (Position::Before, Position::After) => {
-                    let mut in_range = pair.1.split_off(from - current_idx);
-                    let after_range = in_range.split_off(to - from);
-                    let in_range = (new_style, in_range);
-                    let after_range = (pair.0, after_range);
-                    self.buffer.insert(pair_idx + 1, in_range);
-                    self.buffer.insert(pair_idx + 2, after_range);
-                    break;
-                }
-                (Position::Before, Position::In) => {
-                    let in_range = pair.1.split_off(from - current_idx);
-                    pair_idx += 1; // Additional increment for the split pair, since the new insertion is already correctly styled and can be skipped next iteration
-                    self.buffer.insert(pair_idx, (new_style, in_range));
-                }
-                (Position::In, Position::After) => {
-                    let after_range = pair.1.split_off(to - current_idx);
-                    let old_style = pair.0;
-                    pair.0 = new_style;
-                    if !after_range.is_empty() {
-                        self.buffer.insert(pair_idx + 1, (old_style, after_range));
-                    }
-                    break;
-                }
-                (Position::In, Position::In) => pair.0 = new_style,
+        self.map_range(from, to, |_| new_style);
+    }
 
-                (Position::After, _) => break,
-                _ => (),
-            }
-            current_idx = end_idx;
-            pair_idx += 1;
+    /// Composite `new_style` over the styles already in `[from, to)` rather than
+    /// replacing them (see [`overlay`]): `new_style`'s foreground/background win
+    /// where set, and the existing text's colors and attributes show through
+    /// otherwise. `new_style`'s *attributes* (bold, reverse, …) are intentionally
+    /// not applied — callers wanting those should use [`style_range`]. Use this
+    /// for selection highlighting that stays readable over syntax colors.
+    pub fn overlay_range(&mut self, from: usize, to: usize, new_style: Style) {
+        self.map_range(from, to, |s| overlay(s, new_style));
+    }
+
+    /// Apply `f` to the style of every run overlapping `[from, to)`, splitting
+    /// runs at the boundaries so only the overlapping slice is transformed.
+    /// Rebuilds the run buffer; empty pieces are dropped.
+    ///
+    /// `from`/`to` are byte offsets and must fall on `char` boundaries (callers
+    /// pass grapheme-aligned positions from `get_selection`).
+    fn map_range(&mut self, from: usize, to: usize, f: impl Fn(Style) -> Style) {
+        let (from, to) = (from.min(to), to.max(from));
+        let mut out = Vec::with_capacity(self.buffer.len());
+        let mut start = 0;
+        for (style, text) in std::mem::take(&mut self.buffer) {
+            let len = text.len();
+            let a = from.saturating_sub(start).min(len);
+            let b = to.saturating_sub(start).min(len);
+            if a > 0 {
+                out.push((style, text[..a].to_string()));
+            } // before
+            if b > a {
+                out.push((f(style), text[a..b].to_string()));
+            } // inside (needs to be styled)
+            if b < len {
+                out.push((style, text[b..].to_string()));
+            } // outside
+            start += len;
         }
+        self.buffer = out;
     }
 
     /// Render the styled string. We use the insertion point to render around so that
@@ -198,6 +181,18 @@ fn render_as_string(
         rendered.push_str(&renderable.0.paint(line).to_string());
     }
     rendered
+}
+
+/// Merge `sel` over `old`: `sel`'s foreground/background win where set, and the
+/// rest of `old` — its foreground fallback and attributes (bold, italic, …) —
+/// shows through. This is what lets a selection *tint* text without discarding
+/// the underlying syntax highlighting.
+fn overlay(old: Style, sel: Style) -> Style {
+    Style {
+        foreground: sel.foreground.or(old.foreground),
+        background: sel.background.or(old.background),
+        ..old
+    }
 }
 
 #[cfg(test)]
@@ -345,5 +340,63 @@ mod test {
             super::render_as_string(&renderable, &prompt_style, multiline_prompt, Some(&markers));
         assert!(!result.contains("\x1b]133;A;k=s"));
         assert!(!result.contains("\x1b]133;B"));
+    }
+
+    #[test]
+    fn overlay_fn_tints_bg_and_keeps_fg() {
+        let syntax = Style::new().fg(Color::Green).bold();
+        let selection = Style::new().on(Color::Blue); // background-only
+        let merged = super::overlay(syntax, selection);
+        assert_eq!(merged.foreground, Some(Color::Green)); // syntax fg preserved
+        assert_eq!(merged.background, Some(Color::Blue)); // selection bg applied
+        assert!(merged.is_bold); // syntax attribute preserved
+    }
+
+    #[test]
+    fn overlay_fn_selection_fg_wins_when_set() {
+        let syntax = Style::new().fg(Color::Green);
+        let selection = Style::new().fg(Color::White).on(Color::Blue);
+        let merged = super::overlay(syntax, selection);
+        assert_eq!(merged.foreground, Some(Color::White)); // selection fg wins
+        assert_eq!(merged.background, Some(Color::Blue));
+    }
+
+    #[test]
+    fn overlay_range_splits_one_run_and_tints_middle() {
+        let syntax = Style::new().fg(Color::Green);
+        let mut styled_text = super::StyledText {
+            buffer: vec![(syntax, "hello".into())],
+        };
+        // tint [1, 3) with a background-only selection
+        styled_text.overlay_range(1, 3, Style::new().on(Color::Blue));
+        // "hello" → "h" | "el" | "lo"; only the middle gains the bg, fg preserved
+        assert_eq!(styled_text.buffer[0], (syntax, "h".into()));
+        assert_eq!(
+            styled_text.buffer[1],
+            (Style::new().fg(Color::Green).on(Color::Blue), "el".into())
+        );
+        assert_eq!(styled_text.buffer[2], (syntax, "lo".into()));
+    }
+
+    #[test]
+    fn overlay_range_tints_each_run_with_its_own_color() {
+        let green = Style::new().fg(Color::Green);
+        let red = Style::new().fg(Color::Red);
+        let mut styled_text = super::StyledText {
+            buffer: vec![(green, "ab".into()), (red, "cd".into())],
+        };
+        // selection [1, 3) straddles the boundary: "b" (green) and "c" (red)
+        styled_text.overlay_range(1, 3, Style::new().on(Color::Blue));
+        // each run keeps its own fg; only the bg is tinted on the overlapping slice
+        assert_eq!(styled_text.buffer[0], (green, "a".into()));
+        assert_eq!(
+            styled_text.buffer[1],
+            (Style::new().fg(Color::Green).on(Color::Blue), "b".into())
+        );
+        assert_eq!(
+            styled_text.buffer[2],
+            (Style::new().fg(Color::Red).on(Color::Blue), "c".into())
+        );
+        assert_eq!(styled_text.buffer[3], (red, "d".into()));
     }
 }

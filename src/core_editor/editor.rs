@@ -1411,6 +1411,81 @@ mod test {
         assert_eq!(editor.get_selection(), Some((3, 5))); // one grapheme, not two
     }
 
+    // --- granularity gate -------------------------------------------------
+    //
+    // dd/dgg/dG/yy (and the cgg/cG blank-line variant) currently lower to
+    // dedicated linewise commands. The granularity axis will re-lower them
+    // through the operator verbs; these golden masters pin the exact buffer,
+    // cursor, cut content, and — crucially — the `ClipboardMode::Lines` register
+    // tag (what makes paste linewise) so the re-lowering stays behavior-preserving.
+    // Buffer "aaa\nbbb\nccc": a@0..3, \n@3, b@4..7, \n@7, c@8..11; cursor in "bbb".
+
+    fn linewise_editor() -> Editor {
+        let mut editor = editor_with("aaa\nbbb\nccc");
+        editor.move_to_position(5, false);
+        editor
+    }
+
+    #[test]
+    fn cut_current_line_is_linewise() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::CutCurrentLine);
+        assert_eq!(editor.get_buffer(), "aaa\nccc");
+        assert_eq!(editor.insertion_point(), 4);
+        let (content, mode) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb\n");
+        assert!(matches!(mode, ClipboardMode::Lines));
+    }
+
+    #[test]
+    fn cut_from_start_linewise_cuts_through_current_line() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::CutFromStartLinewise {
+            leave_blank_line: false,
+        });
+        assert_eq!(editor.get_buffer(), "ccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, mode) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\nbbb\n");
+        assert!(matches!(mode, ClipboardMode::Lines));
+    }
+
+    #[test]
+    fn cut_from_start_linewise_leave_blank_keeps_empty_line() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::CutFromStartLinewise {
+            leave_blank_line: true,
+        });
+        assert_eq!(editor.get_buffer(), "\nccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, mode) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\nbbb");
+        assert!(matches!(mode, ClipboardMode::Lines));
+    }
+
+    #[test]
+    fn cut_to_end_linewise_cuts_from_current_line() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::CutToEndLinewise {
+            leave_blank_line: false,
+        });
+        assert_eq!(editor.get_buffer(), "aaa");
+        assert_eq!(editor.insertion_point(), 3);
+        let (content, mode) = editor.cut_buffer.get();
+        assert_eq!(content, "\nbbb\nccc");
+        assert!(matches!(mode, ClipboardMode::Lines));
+    }
+
+    #[test]
+    fn copy_current_line_is_linewise_and_nondestructive() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::CopyCurrentLine);
+        assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc"); // unchanged
+        let (content, mode) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb\n");
+        assert!(matches!(mode, ClipboardMode::Lines));
+    }
+
     #[rstest]
     #[case("abc def ghi", 11, "abc def ")]
     #[case("abc def-ghi", 11, "abc def-")]

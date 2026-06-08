@@ -2,7 +2,7 @@ use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer}
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::next_grapheme_boundary;
-use crate::core_editor::{commit, resolve_motion, RestPolicy, SetSelection};
+use crate::core_editor::{commit, resolve_motion, RestPolicy};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -83,11 +83,11 @@ impl Editor {
             EditCommand::MoveBigWordRightEnd { select } => self.move_big_word_right_end(*select),
             EditCommand::Move(t) => {
                 let head = self.resolve_head(*t);
-                self.apply_resolved(SetSelection::motion(head, false));
+                self.move_head_to(head, false);
             }
             EditCommand::Extend(t) => {
                 let head = self.resolve_head(*t);
-                self.apply_resolved(SetSelection::motion(head, true));
+                self.move_head_to(head, true);
             }
             EditCommand::Cut(t) => {
                 let range = self.motion_range(*t);
@@ -212,7 +212,9 @@ impl Editor {
                     );
                 }
             }
-            EditCommand::SwapCursorAndAnchor => self.swap_cursor_and_anchor(),
+            EditCommand::SwapCursorAndAnchor => self
+                .line_buffer
+                .set_cursor(self.line_buffer.cursor().flip()),
             #[cfg(feature = "system_clipboard")]
             EditCommand::CutSelectionSystem => self.cut_selection_to_system(),
             #[cfg(feature = "system_clipboard")]
@@ -248,14 +250,6 @@ impl Editor {
         };
 
         self.update_undo_state(new_undo_behavior);
-    }
-
-    fn swap_cursor_and_anchor(&mut self) {
-        if let Some(anchor) = self.line_buffer.selection_anchor() {
-            let head = self.insertion_point();
-            self.line_buffer.set_selection_anchor(Some(head));
-            self.line_buffer.set_insertion_point(anchor);
-        }
     }
 
     pub(crate) fn clear_selection(&mut self) {
@@ -335,13 +329,18 @@ impl Editor {
         origin.min(dest)..origin.max(dest)
     }
 
-    /// Apply an already-resolved [`SetSelection`], then normalize at the commit
-    /// boundary. Both endpoints commit from the pre-transform snapshot (see
-    /// [`Cursor::transform`]). The single sink every motion/selection op funnels
-    /// through, after its target has been resolved via [`resolve_motion`].
-    fn apply_resolved(&mut self, resolved: SetSelection) {
+    /// Move the cursor head to `head` — collapsing the selection unless `select`
+    /// keeps the anchor — then normalize at the commit boundary (RestPolicy snap
+    /// and selection bookkeeping). The single sink every motion funnels through,
+    /// after its target has been resolved via [`resolve_motion`].
+    fn move_head_to(&mut self, head: usize, select: bool) {
         let was_empty = self.line_buffer.selection_anchor().is_none();
-        let next = self.line_buffer.cursor().transform(resolved);
+        let cursor = self.line_buffer.cursor();
+        let next = if select {
+            cursor.move_head(head)
+        } else {
+            cursor.collapse_to(head)
+        };
         self.line_buffer.set_cursor(next);
         self.commit_cursor();
 
@@ -726,12 +725,12 @@ impl Editor {
 
     fn move_left(&mut self, select: bool) {
         let head = self.resolve_head(MotionTarget::Grapheme(Direction::Backward));
-        self.apply_resolved(SetSelection::motion(head, select));
+        self.move_head_to(head, select);
     }
 
     fn move_right(&mut self, select: bool) {
         let head = self.resolve_head(MotionTarget::Grapheme(Direction::Forward));
-        self.apply_resolved(SetSelection::motion(head, select));
+        self.move_head_to(head, select);
     }
 
     fn select_all(&mut self) {

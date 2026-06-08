@@ -1,80 +1,11 @@
 use crate::{
     core_editor::{
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
-        word, Cursor,
+        word,
     },
     enums::{Direction, MotionTarget, WordEdge},
     FindStop,
 };
-
-/// Identifies one endpoint of a [`Cursor`].
-///
-// No caller until `Pin` is used (flip/`o` swaps anchor↔head).
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Side {
-    Anchor,
-    Head,
-}
-
-/// How one endpoint moves when a [`SetSelection`] is applied.
-///
-/// Endpoints are resolved byte positions — motions resolve their target (via
-/// [`resolve_motion`]) *before* building the `SetSelection`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum End {
-    /// Leave the endpoint at its pre-transform position.
-    Keep,
-    /// Move the endpoint to the given byte position.
-    To(usize),
-    /// Set the endpoint to the pre-transform value of the given `Side`.
-    ///
-    // No caller until flip/`o` (atomic anchor↔head swap) is lowered.
-    #[allow(dead_code)]
-    Pin(Side),
-}
-
-/// How both endpoints change: the one primitive every motion/selection lowers
-/// to. Purely positional — it says *where* each endpoint goes, after the target
-/// has been resolved.
-///
-/// A few examples of what lowers to this (`p` = a resolved position):
-/// - move (collapse):  `{ anchor: To(p), head: To(p) }`
-/// - extend:           `{ anchor: Keep, head: To(p) }`
-/// - flip (`o`):       `{ anchor: Pin(Head), head: Pin(Anchor) }`
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SetSelection {
-    pub(crate) anchor: End,
-    pub(crate) head: End,
-}
-
-impl SetSelection {
-    /// A motion to `target`: collapse onto it, or keep the anchor when extending.
-    pub(crate) fn motion(target: usize, extend: bool) -> Self {
-        SetSelection {
-            anchor: if extend { End::Keep } else { End::To(target) },
-            head: End::To(target),
-        }
-    }
-}
-
-impl Cursor {
-    /// Apply a resolved [`SetSelection`].
-    ///
-    /// Both endpoints read the pre-transform snapshot `(a0, h0)`, so swaps and
-    /// crossings commit atomically — `Pin(Head)`/`Pin(Anchor)` see the *old*
-    /// values, not values already updated this transform.
-    pub(crate) fn transform(self, op: SetSelection) -> Self {
-        let (a0, h0) = (self.anchor(), self.head());
-        let resolve_end = |end: End, own: usize| match end {
-            End::Keep => own,
-            End::To(p) => p,
-            End::Pin(Side::Anchor) => a0,
-            End::Pin(Side::Head) => h0,
-        };
-        Cursor::new(resolve_end(op.anchor, a0), resolve_end(op.head, h0))
-    }
-}
 
 /// A resolved motion: where the cursor head lands, and whether an operator
 /// acting over it consumes the grapheme at `head`.
@@ -126,8 +57,9 @@ pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> 
         MotionTarget::LineEdge(Direction::Forward) => {
             exclusive(buf[origin..].find('\n').map_or(buf.len(), |i| origin + i))
         }
-        // Character search is not yet lowered through `MotionTarget`; vi `f`/`t`
-        // use the dedicated `MoveRightUntil`/… path. No-op rather than panic.
+        // Character search (vi `f`/`t`/`F`/`T`). A miss stays at `origin` (a
+        // no-op) rather than panicking. Forward find is inclusive (`df` eats the
+        // target char); backward is exclusive.
         MotionTarget::Find {
             ch,
             direction,
@@ -168,30 +100,6 @@ fn find_char(
 mod tests {
     use super::*;
     use crate::WordKind;
-
-    fn set(anchor: End, head: End) -> SetSelection {
-        SetSelection { anchor, head }
-    }
-
-    #[test]
-    fn transform_keep_leaves_endpoint() {
-        let c = Cursor::new(2, 5);
-        assert_eq!(c.transform(set(End::Keep, End::To(8))), Cursor::new(2, 8));
-    }
-
-    #[test]
-    fn transform_collapse_moves_both() {
-        let c = Cursor::new(2, 5);
-        assert_eq!(c.transform(set(End::To(8), End::To(8))), Cursor::new(8, 8));
-    }
-
-    #[test]
-    fn transform_pin_is_atomic_swap() {
-        // flip: anchor takes the *old* head, head takes the *old* anchor
-        let c = Cursor::new(2, 5);
-        let flipped = c.transform(set(End::Pin(Side::Head), End::Pin(Side::Anchor)));
-        assert_eq!(flipped, Cursor::new(5, 2));
-    }
 
     fn word(edge: WordEdge, direction: Direction) -> MotionTarget {
         MotionTarget::Word {

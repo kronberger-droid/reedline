@@ -141,10 +141,10 @@ pub enum FindStop {
 /// cursor motion lowers from.
 ///
 /// `Move`/`Extend`/`Cut`/`Copy`/`Erase` over a `MotionTarget` are the
-/// going-forward motion API. They lower internally to the selection primitive
-/// (`SetSelection`), which stays private and free to change. Mode
-/// differences (vi vs emacs vs helix word rules) are carried as *data* here
-/// (e.g. [`WordKind`]) rather than as separate commands.
+/// going-forward motion API. They resolve through the private `resolve_motion`
+/// and apply to the cursor, both free to change. Mode differences (vi vs emacs
+/// vs helix word rules) are carried as *data* here (e.g. [`WordKind`]) rather
+/// than as separate commands.
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum MotionTarget {
     /// One grapheme in `direction` — `MoveLeft`/`MoveRight`.

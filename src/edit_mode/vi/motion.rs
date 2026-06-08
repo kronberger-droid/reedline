@@ -200,6 +200,26 @@ impl Motion {
             Motion::Start => Some(MotionTarget::LineEdge(Direction::Backward)),
             Motion::End => Some(MotionTarget::LineEdge(Direction::Forward)),
 
+            Motion::RightUntil(c) => Some(MotionTarget::Find {
+                ch: *c,
+                direction: Direction::Forward,
+                stop: crate::FindStop::On,
+            }),
+            Motion::RightBefore(c) => Some(MotionTarget::Find {
+                ch: *c,
+                direction: Direction::Forward,
+                stop: crate::FindStop::Before,
+            }),
+            Motion::LeftUntil(c) => Some(MotionTarget::Find {
+                ch: *c,
+                direction: Direction::Backward,
+                stop: crate::FindStop::On,
+            }),
+            Motion::LeftBefore(c) => Some(MotionTarget::Find {
+                ch: *c,
+                direction: Direction::Backward,
+                stop: crate::FindStop::Before,
+            }),
             // Not yet lowered — keep the existing per-variant EditCommand path.
             _ => None,
         }
@@ -273,31 +293,43 @@ impl Motion {
             }],
             Motion::RightUntil(ch) => {
                 vi_state.last_char_search = Some(ViCharSearch::ToRight(*ch));
-                vec![ReedlineOption::Edit(EditCommand::MoveRightUntil {
-                    c: *ch,
-                    select: select_mode,
-                })]
+                let target = self.target().expect("must resolve");
+                let edit = if select_mode {
+                    EditCommand::Extend(target)
+                } else {
+                    EditCommand::Move(target)
+                };
+                vec![ReedlineOption::Edit(edit)]
             }
             Motion::RightBefore(ch) => {
                 vi_state.last_char_search = Some(ViCharSearch::TillRight(*ch));
-                vec![ReedlineOption::Edit(EditCommand::MoveRightBefore {
-                    c: *ch,
-                    select: select_mode,
-                })]
+                let target = self.target().expect("must resolve");
+                let edit = if select_mode {
+                    EditCommand::Extend(target)
+                } else {
+                    EditCommand::Move(target)
+                };
+                vec![ReedlineOption::Edit(edit)]
             }
             Motion::LeftUntil(ch) => {
                 vi_state.last_char_search = Some(ViCharSearch::ToLeft(*ch));
-                vec![ReedlineOption::Edit(EditCommand::MoveLeftUntil {
-                    c: *ch,
-                    select: select_mode,
-                })]
+                let target = self.target().expect("must resolve");
+                let edit = if select_mode {
+                    EditCommand::Extend(target)
+                } else {
+                    EditCommand::Move(target)
+                };
+                vec![ReedlineOption::Edit(edit)]
             }
             Motion::LeftBefore(ch) => {
                 vi_state.last_char_search = Some(ViCharSearch::TillLeft(*ch));
-                vec![ReedlineOption::Edit(EditCommand::MoveLeftBefore {
-                    c: *ch,
-                    select: select_mode,
-                })]
+                let target = self.target().expect("must resolve");
+                let edit = if select_mode {
+                    EditCommand::Extend(target)
+                } else {
+                    EditCommand::Move(target)
+                };
+                vec![ReedlineOption::Edit(edit)]
             }
             Motion::ReplayCharSearch => {
                 if let Some(char_search) = vi_state.last_char_search.as_ref() {

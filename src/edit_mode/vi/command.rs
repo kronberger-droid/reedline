@@ -343,19 +343,19 @@ impl Command {
                 }
                 Motion::RightUntil(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::ToRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CutRightUntil(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::RightBefore(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::TillRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CutRightBefore(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::LeftUntil(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::ToLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CutLeftUntil(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::LeftBefore(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CutLeftBefore(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CutFromLineNonBlankStart,
@@ -410,19 +410,19 @@ impl Command {
                     }
                     Motion::RightUntil(c) => {
                         vi_state.last_char_search = Some(ViCharSearch::ToRight(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::CutRightUntil(*c))])
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                     }
                     Motion::RightBefore(c) => {
                         vi_state.last_char_search = Some(ViCharSearch::TillRight(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::CutRightBefore(*c))])
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                     }
                     Motion::LeftUntil(c) => {
                         vi_state.last_char_search = Some(ViCharSearch::ToLeft(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::CutLeftUntil(*c))])
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                     }
                     Motion::LeftBefore(c) => {
                         vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::CutLeftBefore(*c))])
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
                     }
                     Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                         EditCommand::CutFromLineNonBlankStart,
@@ -472,19 +472,19 @@ impl Command {
                 }
                 Motion::RightUntil(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::ToRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CopyRightUntil(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::RightBefore(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::TillRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CopyRightBefore(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::LeftUntil(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::ToLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CopyLeftUntil(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::LeftBefore(c) => {
                     vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::CopyLeftBefore(*c))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
                 }
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CopyFromLineNonBlankStart,

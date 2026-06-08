@@ -1389,6 +1389,28 @@ mod test {
         assert_eq!(editor.cut_buffer.get().0, "café");
     }
 
+    // Regression for #893: a single selecting move must extend the selection by
+    // exactly one grapheme, not two. The default (exclusive) policy means the
+    // selection end is the head — the cursor-as-range model has no place for the
+    // off-by-one that produced the two-char grab.
+    #[test]
+    fn shift_select_grabs_one_grapheme_per_step() {
+        let mut editor = editor_with("hello");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::MoveRight { select: true });
+        assert_eq!(editor.get_selection(), Some((0, 1)));
+        editor.run_edit_command(&EditCommand::MoveRight { select: true });
+        assert_eq!(editor.get_selection(), Some((0, 2)));
+    }
+
+    #[test]
+    fn shift_select_one_grapheme_over_multibyte() {
+        let mut editor = editor_with("café"); // 'é' is 2 bytes at [3,5)
+        editor.move_to_position(3, false);
+        editor.run_edit_command(&EditCommand::MoveRight { select: true });
+        assert_eq!(editor.get_selection(), Some((3, 5))); // one grapheme, not two
+    }
+
     #[rstest]
     #[case("abc def ghi", 11, "abc def ")]
     #[case("abc def-ghi", 11, "abc def-")]

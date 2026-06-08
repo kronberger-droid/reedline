@@ -2688,4 +2688,52 @@ mod test {
             },
         );
     }
+
+    // The remaining three `Move` corners gate C2(b): `;`/`,` replay re-emits
+    // `Move(stored Find)`, and `,` reverses the stored direction. Proving each
+    // `Move(Find{..})` matches the dedicated `Move*Until`/`Move*Before` it
+    // replaces means the replay migration preserves where the cursor lands —
+    // including the reversed (`,`) direction.
+
+    #[test]
+    fn move_find_forward_before_matches_move_right_before() {
+        // bare `;` after `t`
+        equivalent(
+            "foo bar baz",
+            0,
+            &EditCommand::Move(find('b', Direction::Forward, FindStop::Before)),
+            &EditCommand::MoveRightBefore {
+                c: 'b',
+                select: false,
+            },
+        );
+    }
+
+    #[test]
+    fn move_find_backward_on_matches_move_left_until() {
+        // bare `;` after `F`, and the `,`-reverse of `f`
+        equivalent(
+            "foo bar baz",
+            11,
+            &EditCommand::Move(find('o', Direction::Backward, FindStop::On)),
+            &EditCommand::MoveLeftUntil {
+                c: 'o',
+                select: false,
+            },
+        );
+    }
+
+    #[test]
+    fn move_find_backward_before_matches_move_left_before() {
+        // bare `;` after `T`, and the `,`-reverse of `t`
+        equivalent(
+            "foo bar baz",
+            11,
+            &EditCommand::Move(find('o', Direction::Backward, FindStop::Before)),
+            &EditCommand::MoveLeftBefore {
+                c: 'o',
+                select: false,
+            },
+        );
+    }
 }

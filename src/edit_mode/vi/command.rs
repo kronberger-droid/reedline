@@ -356,6 +356,9 @@ impl Command {
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::Delete)]),
                 Motion::Up => None,
                 Motion::Down => None,
+                // `gg`/`G` are *linewise* as operators (whole-line cut), so they
+                // keep the dedicated linewise commands rather than the charwise
+                // `Cut(BufferEdge)`. They converge once the granularity axis lands.
                 Motion::FirstLine => Some(vec![ReedlineOption::Edit(
                     EditCommand::CutFromStartLinewise {
                         leave_blank_line: false,
@@ -413,6 +416,8 @@ impl Command {
                     Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::Delete)]),
                     Motion::Up => None,
                     Motion::Down => None,
+                    // `cgg`/`cG` are linewise (whole-line change) — see the note
+                    // in the `Delete` arm; they stay on the dedicated commands.
                     Motion::FirstLine => Some(vec![ReedlineOption::Edit(
                         EditCommand::CutFromStartLinewise {
                             leave_blank_line: true,
@@ -464,6 +469,8 @@ impl Command {
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::CopyRight)]),
                 Motion::Up => None,
                 Motion::Down => None,
+                // `ygg`/`yG` are linewise (whole-line yank) — see the note in the
+                // `Delete` arm; they stay on the dedicated commands.
                 Motion::FirstLine => Some(vec![ReedlineOption::Edit(
                     EditCommand::CopyFromStartLinewise,
                 )]),

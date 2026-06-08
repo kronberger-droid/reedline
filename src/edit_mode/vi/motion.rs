@@ -166,13 +166,15 @@ pub enum Motion {
 }
 
 impl Motion {
-    /// The [`MotionTarget`] this motion resolves to, for motions expressible in
-    /// the new parameterized vocabulary.
+    /// The [`MotionTarget`] this motion resolves to, for motions with a static
+    /// target.
     ///
-    /// `None` for motions not yet lowered (line moves, char search, up/down) —
-    /// those keep their existing per-variant `EditCommand` lowering. Both the
-    /// bare-motion path (`Move`/`Extend`) and the operator path (`Cut`/`Copy`)
-    /// read this one mapping, so the vi-word semantics live in a single place.
+    /// `None` for motions that have no fixed mapping: `h`/`l`, `j`/`k`, `^`, the
+    /// doubled-operator `Line` (`dd`/`cc`/`yy`), and the `;`/`,` replays (whose
+    /// target is the dynamic `last_char_search`). Those keep their own lowering.
+    /// Every motion with a static target reads this one map on both the
+    /// bare-motion path (`Move`/`Extend`) and the operator path (`Cut`/`Copy`),
+    /// so its semantics live in a single place.
     pub(super) fn target(&self) -> Option<MotionTarget> {
         // A word target, spelled compactly.
         let word = |kind: WordKind, edge: WordEdge, direction: Direction| MotionTarget::Word {
@@ -220,6 +222,9 @@ impl Motion {
                 direction: Direction::Backward,
                 stop: crate::FindStop::Before,
             }),
+            Motion::FirstLine => Some(MotionTarget::BufferEdge(Direction::Backward)),
+            Motion::LastLine => Some(MotionTarget::BufferEdge(Direction::Forward)),
+
             // Not yet lowered — keep the existing per-variant EditCommand path.
             _ => None,
         }
@@ -265,6 +270,8 @@ impl Motion {
             | Motion::NextBigWordEnd
             | Motion::PreviousWord
             | Motion::PreviousBigWord
+            | Motion::FirstLine
+            | Motion::LastLine
             | Motion::Start
             | Motion::End => {
                 let target = self.target().expect("motion resolves to a MotionTarget");
@@ -281,16 +288,6 @@ impl Motion {
                     select: select_mode,
                 })]
             }
-            Motion::FirstLine => vec![if select_mode {
-                ReedlineOption::Edit(EditCommand::MoveToStart { select: true })
-            } else {
-                ReedlineOption::Event(ReedlineEvent::ToStart)
-            }],
-            Motion::LastLine => vec![if select_mode {
-                ReedlineOption::Edit(EditCommand::MoveToEnd { select: true })
-            } else {
-                ReedlineOption::Event(ReedlineEvent::ToEnd)
-            }],
             Motion::RightUntil(_)
             | Motion::RightBefore(_)
             | Motion::LeftUntil(_)

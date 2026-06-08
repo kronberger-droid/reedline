@@ -8,7 +8,7 @@
 //! - **big WORD** (`W`/`B`/`E`): only whitespace/EOL transitions count, so a run
 //!   of `Word` and `Punctuation` together is one WORD.
 //!
-//! Modes pick a flavor; the resolver (`locate`) scans with the matching
+//! Modes pick a flavor; the resolver (`locate_word`) scans with the matching
 //! predicate. Keeping the classifier here — mode-agnostic and tested in isolation
 //! — means vi-word, vi-WORD, emacs-word, and helix-word are thin variations over
 //! one definition rather than eight ad-hoc functions.
@@ -18,7 +18,6 @@ use crate::enums::{WordEdge, WordKind};
 
 /// Classification of a character for word-boundary detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // resolver (`locate`) lands in a following commit
 pub(crate) enum CharClass {
     /// Alphanumeric or `_` — the characters that make up a "word".
     Word,
@@ -32,7 +31,6 @@ pub(crate) enum CharClass {
 }
 
 /// Sort `ch` into a [`CharClass`].
-#[allow(dead_code)] // resolver (`locate`) lands in a following commit
 pub(crate) fn categorize_char(ch: char) -> CharClass {
     match ch {
         '\n' => CharClass::Eol,
@@ -43,14 +41,12 @@ pub(crate) fn categorize_char(ch: char) -> CharClass {
 }
 
 /// `true` if a *small word* boundary lies between `a` and `b` — any class change.
-#[allow(dead_code)] // resolver (`locate`) lands in a following commit
 pub(crate) fn is_word_boundary(a: char, b: char) -> bool {
     categorize_char(a) != categorize_char(b)
 }
 
 /// `true` if a *big WORD* boundary lies between `a` and `b` — a class change,
 /// except `Word`↔`Punctuation`, which stay fused into one WORD.
-#[allow(dead_code)] // resolver (`locate`) lands in a following commit
 pub(crate) fn is_long_word_boundary(a: char, b: char) -> bool {
     match (categorize_char(a), categorize_char(b)) {
         (CharClass::Word, CharClass::Punctuation) | (CharClass::Punctuation, CharClass::Word) => {
@@ -68,7 +64,6 @@ pub(crate) fn is_long_word_boundary(a: char, b: char) -> bool {
 /// - `(true,  Start)` → `w` / `W`   (next word's first char)
 /// - `(true,  End)`   → `e` / `E`   (next word's last char, inclusive)
 /// - `(false, Start)` → `b` / `B`   (previous word's first char)
-#[allow(dead_code)] // producer is the `Boundary::Word` locate arm + re-lowered motions
 pub(crate) fn locate_word(
     buf: &str,
     origin: usize,

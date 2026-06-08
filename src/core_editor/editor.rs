@@ -2,11 +2,11 @@ use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer}
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::next_grapheme_boundary;
-use crate::core_editor::{commit, locate, resolve_motion, Boundary, RestPolicy, SetSelection};
+use crate::core_editor::{commit, resolve_motion, RestPolicy, SetSelection};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
-use crate::MotionTarget;
 use crate::{core_editor::get_local_clipboard, EditCommand};
+use crate::{Direction, MotionTarget};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
 
@@ -335,21 +335,11 @@ impl Editor {
         origin.min(dest)..origin.max(dest)
     }
 
-    /// Resolve a [`Boundary`]-typed [`SetSelection`] relative to the current
-    /// head, then apply it. Used by the grapheme/line motions that still speak
-    /// `Boundary`; the `MotionTarget` verbs resolve via [`resolve_motion`] and
-    /// call [`apply_resolved`](Self::apply_resolved) directly.
-    fn set_selection(&mut self, op: SetSelection<Boundary>) {
-        let head = self.insertion_point();
-        let resolved = op.resolve(|b| locate(self.line_buffer.get_buffer(), head, b));
-        self.apply_resolved(resolved);
-    }
-
     /// Apply an already-resolved [`SetSelection`], then normalize at the commit
     /// boundary. Both endpoints commit from the pre-transform snapshot (see
     /// [`Cursor::transform`]). The single sink every motion/selection op funnels
-    /// through, whether its endpoints came from a `Boundary` or a `MotionTarget`.
-    fn apply_resolved(&mut self, resolved: SetSelection<usize>) {
+    /// through, after its target has been resolved via [`resolve_motion`].
+    fn apply_resolved(&mut self, resolved: SetSelection) {
         let was_empty = self.line_buffer.selection_anchor().is_none();
         let next = self.line_buffer.cursor().transform(resolved);
         self.line_buffer.set_cursor(next);
@@ -735,11 +725,13 @@ impl Editor {
     }
 
     fn move_left(&mut self, select: bool) {
-        self.set_selection(SetSelection::motion(Boundary::GraphemeLeft, select));
+        let head = self.resolve_head(MotionTarget::Grapheme(Direction::Backward));
+        self.apply_resolved(SetSelection::motion(head, select));
     }
 
     fn move_right(&mut self, select: bool) {
-        self.set_selection(SetSelection::motion(Boundary::GraphemeRight, select));
+        let head = self.resolve_head(MotionTarget::Grapheme(Direction::Forward));
+        self.apply_resolved(SetSelection::motion(head, select));
     }
 
     fn select_all(&mut self) {
@@ -2413,7 +2405,7 @@ mod test {
     // --- MotionTarget verbs (Move / Extend / Cut / Copy / Erase) ---
     //
     // These drive the public verbs through the full lowering
-    // (`MotionTarget` -> `Boundary` -> `locate`) in the default (emacs)
+    // (`MotionTarget` -> `resolve_motion`) in the default (emacs)
     // editor, proving the substrate in isolation before any keymap emits it.
 
     /// `w` as a target: small-word start, forward.

@@ -327,17 +327,18 @@ impl Command {
     ) -> Option<Vec<ReedlineOption>> {
         match self {
             Self::Delete => match motion {
-                Motion::End => Some(vec![ReedlineOption::Edit(EditCommand::CutToLineEnd)]),
                 Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::CutCurrentLine)]),
-                // All word motions lower through one parameterized verb: cut to
-                // the motion's target (`motion_range` makes `e`/`E` inclusive).
+                // Word and line-edge motions lower through one parameterized verb:
+                // cut to the motion's target (`motion_range` makes `e`/`E` inclusive).
                 Motion::NextWord
                 | Motion::NextBigWord
                 | Motion::NextWordEnd
                 | Motion::NextBigWordEnd
                 | Motion::PreviousWord
-                | Motion::PreviousBigWord => {
-                    let target = motion.target().expect("word motion resolves to a target");
+                | Motion::PreviousBigWord
+                | Motion::Start
+                | Motion::End => {
+                    let target = motion.target().expect("motion resolves to a target");
                     Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
                 }
                 Motion::RightUntil(c) => {
@@ -356,7 +357,6 @@ impl Command {
                     vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
                     Some(vec![ReedlineOption::Edit(EditCommand::CutLeftBefore(*c))])
                 }
-                Motion::Start => Some(vec![ReedlineOption::Edit(EditCommand::CutFromLineStart)]),
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CutFromLineNonBlankStart,
                 )]),
@@ -385,25 +385,27 @@ impl Command {
             },
             Self::Change => {
                 let op = match motion {
-                    Motion::End => Some(vec![ReedlineOption::Edit(EditCommand::CutToLineEnd)]),
                     Motion::Line => Some(vec![
                         ReedlineOption::Edit(EditCommand::MoveToLineStart { select: false }),
                         ReedlineOption::Edit(EditCommand::CutToLineEnd),
                     ]),
                     // `cw`/`cW` act like `ce`/`cE`: change to the word *end*, not the
-                    // next word's start. The other word motions use their own target.
+                    // next word's start. Other word and line-edge motions (`c$`/`c0`)
+                    // use their own target.
                     Motion::NextWord
                     | Motion::NextBigWord
                     | Motion::NextWordEnd
                     | Motion::NextBigWordEnd
                     | Motion::PreviousWord
-                    | Motion::PreviousBigWord => {
+                    | Motion::PreviousBigWord
+                    | Motion::Start
+                    | Motion::End => {
                         let target = match motion {
                             Motion::NextWord => Motion::NextWordEnd.target(),
                             Motion::NextBigWord => Motion::NextBigWordEnd.target(),
                             other => other.target(),
                         }
-                        .expect("word motion resolves to a target");
+                        .expect("motion resolves to a target");
                         Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
                     }
                     Motion::RightUntil(c) => {
@@ -421,9 +423,6 @@ impl Command {
                     Motion::LeftBefore(c) => {
                         vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
                         Some(vec![ReedlineOption::Edit(EditCommand::CutLeftBefore(*c))])
-                    }
-                    Motion::Start => {
-                        Some(vec![ReedlineOption::Edit(EditCommand::CutFromLineStart)])
                     }
                     Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                         EditCommand::CutFromLineNonBlankStart,
@@ -459,15 +458,16 @@ impl Command {
                 })
             }
             Self::Yank => match motion {
-                Motion::End => Some(vec![ReedlineOption::Edit(EditCommand::CopyToLineEnd)]),
                 Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::CopyCurrentLine)]),
                 Motion::NextWord
                 | Motion::NextBigWord
                 | Motion::NextWordEnd
                 | Motion::NextBigWordEnd
                 | Motion::PreviousWord
-                | Motion::PreviousBigWord => {
-                    let target = motion.target().expect("word motion resolves to a target");
+                | Motion::PreviousBigWord
+                | Motion::Start
+                | Motion::End => {
+                    let target = motion.target().expect("motion resolves to a target");
                     Some(vec![ReedlineOption::Edit(EditCommand::Copy(target))])
                 }
                 Motion::RightUntil(c) => {
@@ -486,7 +486,6 @@ impl Command {
                     vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
                     Some(vec![ReedlineOption::Edit(EditCommand::CopyLeftBefore(*c))])
                 }
-                Motion::Start => Some(vec![ReedlineOption::Edit(EditCommand::CopyFromLineStart)]),
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CopyFromLineNonBlankStart,
                 )]),

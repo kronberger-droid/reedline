@@ -291,9 +291,12 @@ impl Motion {
             } else {
                 ReedlineOption::Event(ReedlineEvent::ToEnd)
             }],
-            Motion::RightUntil(ch) => {
-                vi_state.last_char_search = Some(ViCharSearch::ToRight(*ch));
+            Motion::RightUntil(_)
+            | Motion::RightBefore(_)
+            | Motion::LeftUntil(_)
+            | Motion::LeftBefore(_) => {
                 let target = self.target().expect("must resolve");
+                vi_state.last_char_search = Some(target);
                 let edit = if select_mode {
                     EditCommand::Extend(target)
                 } else {
@@ -301,116 +304,28 @@ impl Motion {
                 };
                 vec![ReedlineOption::Edit(edit)]
             }
-            Motion::RightBefore(ch) => {
-                vi_state.last_char_search = Some(ViCharSearch::TillRight(*ch));
-                let target = self.target().expect("must resolve");
-                let edit = if select_mode {
-                    EditCommand::Extend(target)
-                } else {
-                    EditCommand::Move(target)
-                };
-                vec![ReedlineOption::Edit(edit)]
-            }
-            Motion::LeftUntil(ch) => {
-                vi_state.last_char_search = Some(ViCharSearch::ToLeft(*ch));
-                let target = self.target().expect("must resolve");
-                let edit = if select_mode {
-                    EditCommand::Extend(target)
-                } else {
-                    EditCommand::Move(target)
-                };
-                vec![ReedlineOption::Edit(edit)]
-            }
-            Motion::LeftBefore(ch) => {
-                vi_state.last_char_search = Some(ViCharSearch::TillLeft(*ch));
-                let target = self.target().expect("must resolve");
-                let edit = if select_mode {
-                    EditCommand::Extend(target)
-                } else {
-                    EditCommand::Move(target)
-                };
-                vec![ReedlineOption::Edit(edit)]
-            }
-            Motion::ReplayCharSearch => {
-                if let Some(char_search) = vi_state.last_char_search.as_ref() {
-                    vec![ReedlineOption::Edit(char_search.to_move(select_mode))]
-                } else {
-                    vec![]
-                }
-            }
-            Motion::ReverseCharSearch => {
-                if let Some(char_search) = vi_state.last_char_search.as_ref() {
-                    vec![ReedlineOption::Edit(
-                        char_search.reverse().to_move(select_mode),
-                    )]
-                } else {
-                    vec![]
-                }
-            }
-        }
-    }
-}
-
-/// Vi left-right motions to or till a character.
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ViCharSearch {
-    /// f
-    ToRight(char),
-    /// F
-    ToLeft(char),
-    /// t
-    TillRight(char),
-    /// T
-    TillLeft(char),
-}
-
-impl ViCharSearch {
-    /// Swap the direction of the to or till for ','
-    pub fn reverse(&self) -> Self {
-        match self {
-            ViCharSearch::ToRight(c) => ViCharSearch::ToLeft(*c),
-            ViCharSearch::ToLeft(c) => ViCharSearch::ToRight(*c),
-            ViCharSearch::TillRight(c) => ViCharSearch::TillLeft(*c),
-            ViCharSearch::TillLeft(c) => ViCharSearch::TillRight(*c),
-        }
-    }
-
-    pub fn to_move(&self, select_mode: bool) -> EditCommand {
-        match self {
-            ViCharSearch::ToRight(c) => EditCommand::MoveRightUntil {
-                c: *c,
-                select: select_mode,
-            },
-            ViCharSearch::ToLeft(c) => EditCommand::MoveLeftUntil {
-                c: *c,
-                select: select_mode,
-            },
-            ViCharSearch::TillRight(c) => EditCommand::MoveRightBefore {
-                c: *c,
-                select: select_mode,
-            },
-            ViCharSearch::TillLeft(c) => EditCommand::MoveLeftBefore {
-                c: *c,
-                select: select_mode,
-            },
-        }
-    }
-
-    pub fn to_cut(&self) -> EditCommand {
-        match self {
-            ViCharSearch::ToRight(c) => EditCommand::CutRightUntil(*c),
-            ViCharSearch::ToLeft(c) => EditCommand::CutLeftUntil(*c),
-            ViCharSearch::TillRight(c) => EditCommand::CutRightBefore(*c),
-            ViCharSearch::TillLeft(c) => EditCommand::CutLeftBefore(*c),
-        }
-    }
-
-    pub fn to_copy(&self) -> EditCommand {
-        match self {
-            ViCharSearch::ToRight(c) => EditCommand::CopyRightUntil(*c),
-            ViCharSearch::TillRight(c) => EditCommand::CopyRightBefore(*c),
-            ViCharSearch::ToLeft(c) => EditCommand::CopyLeftUntil(*c),
-            ViCharSearch::TillLeft(c) => EditCommand::CopyLeftBefore(*c),
+            Motion::ReplayCharSearch => vi_state
+                .last_char_search
+                .map(|target| {
+                    let edit = if select_mode {
+                        EditCommand::Extend(target)
+                    } else {
+                        EditCommand::Move(target)
+                    };
+                    vec![ReedlineOption::Edit(edit)]
+                })
+                .unwrap_or_default(),
+            Motion::ReverseCharSearch => vi_state
+                .last_char_search
+                .map(|target| {
+                    let edit = if select_mode {
+                        EditCommand::Extend(target.reversed())
+                    } else {
+                        EditCommand::Move(target.reversed())
+                    };
+                    vec![ReedlineOption::Edit(edit)]
+                })
+                .unwrap_or_default(),
         }
     }
 }

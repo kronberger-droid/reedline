@@ -1,4 +1,4 @@
-use super::{motion::Motion, motion::ViCharSearch, parser::ReedlineOption, ViMode};
+use super::{motion::Motion, parser::ReedlineOption, ViMode};
 use crate::enums::{TextObject, TextObjectScope, TextObjectType};
 use crate::{EditCommand, ReedlineEvent, Vi};
 use std::iter::Peekable;
@@ -341,21 +341,13 @@ impl Command {
                     let target = motion.target().expect("motion resolves to a target");
                     Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
                 }
-                Motion::RightUntil(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::ToRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
-                }
-                Motion::RightBefore(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::TillRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
-                }
-                Motion::LeftUntil(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::ToLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
-                }
-                Motion::LeftBefore(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
+                Motion::RightUntil(_)
+                | Motion::RightBefore(_)
+                | Motion::LeftUntil(_)
+                | Motion::LeftBefore(_) => {
+                    let target = motion.target().expect("char search resolves to a target");
+                    vi_state.last_char_search = Some(target);
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
                 }
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CutFromLineNonBlankStart,
@@ -376,12 +368,10 @@ impl Command {
                 }
                 Motion::ReplayCharSearch => vi_state
                     .last_char_search
-                    .as_ref()
-                    .map(|char_search| vec![ReedlineOption::Edit(char_search.to_cut())]),
+                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Cut(target))]),
                 Motion::ReverseCharSearch => vi_state
                     .last_char_search
-                    .as_ref()
-                    .map(|char_search| vec![ReedlineOption::Edit(char_search.reverse().to_cut())]),
+                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Cut(target.reversed()))]),
             },
             Self::Change => {
                 let op = match motion {
@@ -408,21 +398,13 @@ impl Command {
                         .expect("motion resolves to a target");
                         Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
                     }
-                    Motion::RightUntil(c) => {
-                        vi_state.last_char_search = Some(ViCharSearch::ToRight(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
-                    }
-                    Motion::RightBefore(c) => {
-                        vi_state.last_char_search = Some(ViCharSearch::TillRight(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
-                    }
-                    Motion::LeftUntil(c) => {
-                        vi_state.last_char_search = Some(ViCharSearch::ToLeft(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
-                    }
-                    Motion::LeftBefore(c) => {
-                        vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
-                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(motion.target().expect("char search resolves to a target")))])
+                    Motion::RightUntil(_)
+                    | Motion::RightBefore(_)
+                    | Motion::LeftUntil(_)
+                    | Motion::LeftBefore(_) => {
+                        let target = motion.target().expect("char search resolves to a target");
+                        vi_state.last_char_search = Some(target);
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
                     }
                     Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                         EditCommand::CutFromLineNonBlankStart,
@@ -443,13 +425,10 @@ impl Command {
                     }
                     Motion::ReplayCharSearch => vi_state
                         .last_char_search
-                        .as_ref()
-                        .map(|char_search| vec![ReedlineOption::Edit(char_search.to_cut())]),
-                    Motion::ReverseCharSearch => {
-                        vi_state.last_char_search.as_ref().map(|char_search| {
-                            vec![ReedlineOption::Edit(char_search.reverse().to_cut())]
-                        })
-                    }
+                        .map(|target| vec![ReedlineOption::Edit(EditCommand::Cut(target))]),
+                    Motion::ReverseCharSearch => vi_state.last_char_search.map(|target| {
+                        vec![ReedlineOption::Edit(EditCommand::Cut(target.reversed()))]
+                    }),
                 };
                 // Semihack: Append `Repaint` to ensure the mode change gets displayed
                 op.map(|mut vec| {
@@ -470,21 +449,13 @@ impl Command {
                     let target = motion.target().expect("motion resolves to a target");
                     Some(vec![ReedlineOption::Edit(EditCommand::Copy(target))])
                 }
-                Motion::RightUntil(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::ToRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
-                }
-                Motion::RightBefore(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::TillRight(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
-                }
-                Motion::LeftUntil(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::ToLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
-                }
-                Motion::LeftBefore(c) => {
-                    vi_state.last_char_search = Some(ViCharSearch::TillLeft(*c));
-                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(motion.target().expect("char search resolves to a target")))])
+                Motion::RightUntil(_)
+                | Motion::RightBefore(_)
+                | Motion::LeftUntil(_)
+                | Motion::LeftBefore(_) => {
+                    let target = motion.target().expect("char search resolves to a target");
+                    vi_state.last_char_search = Some(target);
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(target))])
                 }
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CopyFromLineNonBlankStart,
@@ -501,12 +472,10 @@ impl Command {
                 }
                 Motion::ReplayCharSearch => vi_state
                     .last_char_search
-                    .as_ref()
-                    .map(|char_search| vec![ReedlineOption::Edit(char_search.to_copy())]),
+                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Copy(target))]),
                 Motion::ReverseCharSearch => vi_state
                     .last_char_search
-                    .as_ref()
-                    .map(|char_search| vec![ReedlineOption::Edit(char_search.reverse().to_copy())]),
+                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Copy(target.reversed()))]),
             },
             _ => None,
         }

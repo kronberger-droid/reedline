@@ -97,6 +97,15 @@ pub enum Direction {
     Backward,
 }
 
+impl Direction {
+    pub(crate) fn reversed(self) -> Self {
+        match self {
+            Direction::Forward => Direction::Backward,
+            Direction::Backward => Direction::Forward,
+        }
+    }
+}
+
 /// Which "word" notion a word motion uses.
 ///
 /// The flavors differ only in which character-class transitions count as a
@@ -164,6 +173,28 @@ pub enum MotionTarget {
     },
     /// Absolute byte offset (clamped into the buffer).
     Offset(usize),
+}
+
+impl MotionTarget {
+    /// The `,`-style reverse: flip a [`Find`](MotionTarget::Find)'s direction.
+    ///
+    /// Only `Find` is reversible — every other target passes through unchanged,
+    /// because a reversed word/line edge is a *different* motion, not the same
+    /// motion the other way (e.g. backward word-end is `ge`, not `e` flipped).
+    pub(crate) fn reversed(self) -> Self {
+        match self {
+            MotionTarget::Find {
+                ch,
+                direction,
+                stop,
+            } => MotionTarget::Find {
+                ch,
+                direction: direction.reversed(),
+                stop,
+            },
+            other => other,
+        }
+    }
 }
 
 /// Editing actions which can be mapped to key bindings.

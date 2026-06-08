@@ -2528,13 +2528,18 @@ mod test {
     // they must stay green after the motions emit `Cut/Move(Find)`.
 
     /// Run `cmd` on `buffer` from `cursor`; return (buffer, cursor, cut text).
-    fn outcome(buffer: &str, cursor: usize, cmd: &EditCommand) -> (String, usize, String) {
+    fn outcome(
+        buffer: &str,
+        cursor: usize,
+        cmd: &EditCommand,
+    ) -> (String, usize, Option<(usize, usize)>, String) {
         let mut editor = editor_with(buffer);
         editor.move_to_position(cursor, false);
         editor.run_edit_command(cmd);
         (
             editor.get_buffer().to_string(),
             editor.insertion_point(),
+            editor.get_selection(),
             editor.cut_buffer.get().0,
         )
     }
@@ -2597,7 +2602,7 @@ mod test {
             &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
             &EditCommand::CutToLineEnd,
         );
-        let (buffer, cursor, cut) = outcome(
+        let (buffer, cursor, _selection, cut) = outcome(
             "ab\ncd",
             0,
             &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
@@ -2605,6 +2610,61 @@ mod test {
         assert_eq!(buffer, "\ncd");
         assert_eq!(cursor, 0);
         assert_eq!(cut, "ab");
+    }
+
+    // C3 gate: `gg`/`G` (BufferEdge) vs the dedicated MoveToStart/MoveToEnd.
+    // BufferEdge ignores line breaks — it goes to the buffer edge, not a line
+    // edge — so these also confirm the multiline behavior.
+
+    #[test]
+    fn move_buffer_edge_matches_move_to_start_end() {
+        equivalent(
+            "foo bar",
+            3,
+            &EditCommand::Move(MotionTarget::BufferEdge(Direction::Backward)),
+            &EditCommand::MoveToStart { select: false },
+        );
+        equivalent(
+            "foo bar",
+            3,
+            &EditCommand::Move(MotionTarget::BufferEdge(Direction::Forward)),
+            &EditCommand::MoveToEnd { select: false },
+        );
+    }
+
+    #[test]
+    fn extend_buffer_edge_matches_move_to_start_end_selecting() {
+        // visual `gg`/`G` — the selection must match too (now compared by `outcome`)
+        equivalent(
+            "foo bar",
+            3,
+            &EditCommand::Extend(MotionTarget::BufferEdge(Direction::Backward)),
+            &EditCommand::MoveToStart { select: true },
+        );
+        equivalent(
+            "foo bar",
+            3,
+            &EditCommand::Extend(MotionTarget::BufferEdge(Direction::Forward)),
+            &EditCommand::MoveToEnd { select: true },
+        );
+    }
+
+    #[test]
+    fn buffer_edge_spans_lines() {
+        // from the second line, `gg` lands at buffer start (not the line start)
+        // and `G` at buffer end.
+        equivalent(
+            "ab\ncd",
+            4,
+            &EditCommand::Move(MotionTarget::BufferEdge(Direction::Backward)),
+            &EditCommand::MoveToStart { select: false },
+        );
+        equivalent(
+            "ab\ncd",
+            0,
+            &EditCommand::Move(MotionTarget::BufferEdge(Direction::Forward)),
+            &EditCommand::MoveToEnd { select: false },
+        );
     }
 
     // C2 gate: `f`/`t`/`F`/`T` (Find) vs the dedicated char-search commands.

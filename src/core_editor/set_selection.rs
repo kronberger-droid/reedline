@@ -371,4 +371,44 @@ mod tests {
             0
         );
     }
+
+    // --- line / buffer edges (`0`/`$`/`gg`/`G`) ---
+    //
+    // The whole reason `LineEdge` and `BufferEdge` are distinct targets is
+    // multiline: `$` must stop at the next `\n`, not run to the buffer end.
+    // `"ab\ncd"` has bytes a0 b1 \n2 c3 d4, len 5.
+
+    #[test]
+    fn resolve_motion_line_edge_forward_stops_at_newline() {
+        // `$` from inside the first line lands *at* the `\n`, not the buffer end.
+        assert_eq!(
+            resolve_motion("ab\ncd", 0, MotionTarget::LineEdge(Direction::Forward)),
+            Movement {
+                head: 2,
+                inclusive: false
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_motion_line_edge_backward_stops_at_line_start() {
+        // `0` from the second line lands at that line's start (byte 3), not 0.
+        assert_eq!(
+            resolve_motion("ab\ncd", 4, MotionTarget::LineEdge(Direction::Backward)).head,
+            3
+        );
+    }
+
+    #[test]
+    fn resolve_motion_buffer_edge_spans_whole_buffer() {
+        // `G` / `gg` ignore line breaks — start is 0, end is the buffer length.
+        assert_eq!(
+            resolve_motion("ab\ncd", 0, MotionTarget::BufferEdge(Direction::Forward)).head,
+            5
+        );
+        assert_eq!(
+            resolve_motion("ab\ncd", 4, MotionTarget::BufferEdge(Direction::Backward)).head,
+            0
+        );
+    }
 }

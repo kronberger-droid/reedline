@@ -1242,7 +1242,7 @@ fn insert_clipboard_content_before(line_buffer: &mut LineBuffer, clipboard: &mut
 mod test {
     use super::*;
     use crate::prompt::PromptViMode;
-    use crate::{Direction, WordEdge, WordKind};
+    use crate::{Direction, FindStop, WordEdge, WordKind};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
@@ -2516,5 +2516,176 @@ mod test {
         editor.run_edit_command(&EditCommand::Cut(word_end_fwd()));
         assert_eq!(editor.get_buffer(), " bar");
         assert_eq!(editor.cut_buffer.get().0, "foo");
+    }
+
+    // --- migration characterization -------------------------------------
+    //
+    // The new `MotionTarget` verbs must have the *same buffer effect* as the
+    // dedicated commands they replace — the old command is the spec. These
+    // assert `new == old` so they need no hand-computed vim semantics. They
+    // pass on the pre-migration code, so they retroactively prove C1's `0`/`$`
+    // re-lowering was behavior-preserving and *gate* C2's `f`/`t` re-lowering:
+    // they must stay green after the motions emit `Cut/Move(Find)`.
+
+    /// Run `cmd` on `buffer` from `cursor`; return (buffer, cursor, cut text).
+    fn outcome(buffer: &str, cursor: usize, cmd: &EditCommand) -> (String, usize, String) {
+        let mut editor = editor_with(buffer);
+        editor.move_to_position(cursor, false);
+        editor.run_edit_command(cmd);
+        (
+            editor.get_buffer().to_string(),
+            editor.insertion_point(),
+            editor.cut_buffer.get().0,
+        )
+    }
+
+    /// Assert two commands have identical effect from the same starting point.
+    fn equivalent(buffer: &str, cursor: usize, new: &EditCommand, old: &EditCommand) {
+        assert_eq!(outcome(buffer, cursor, new), outcome(buffer, cursor, old));
+    }
+
+    fn find(ch: char, direction: Direction, stop: FindStop) -> MotionTarget {
+        MotionTarget::Find {
+            ch,
+            direction,
+            stop,
+        }
+    }
+
+    // C1 backfill: `0`/`$` line edges vs the dedicated line cut/copy commands.
+
+    #[test]
+    fn cut_line_edge_matches_dedicated_line_cuts() {
+        // `d$` and `d0` on a single line.
+        equivalent(
+            "foo bar",
+            2,
+            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::CutToLineEnd,
+        );
+        equivalent(
+            "foo bar",
+            4,
+            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Backward)),
+            &EditCommand::CutFromLineStart,
+        );
+    }
+
+    #[test]
+    fn copy_line_edge_matches_dedicated_line_copies() {
+        equivalent(
+            "foo bar",
+            2,
+            &EditCommand::Copy(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::CopyToLineEnd,
+        );
+        equivalent(
+            "foo bar",
+            4,
+            &EditCommand::Copy(MotionTarget::LineEdge(Direction::Backward)),
+            &EditCommand::CopyFromLineStart,
+        );
+    }
+
+    #[test]
+    fn cut_line_edge_forward_stops_at_newline() {
+        // The riskiest C1 claim: on a multiline buffer `d$` must cut only to the
+        // `\n`, matching `CutToLineEnd` — not run to the buffer end.
+        equivalent(
+            "ab\ncd",
+            0,
+            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::CutToLineEnd,
+        );
+        let (buffer, cursor, cut) = outcome(
+            "ab\ncd",
+            0,
+            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
+        );
+        assert_eq!(buffer, "\ncd");
+        assert_eq!(cursor, 0);
+        assert_eq!(cut, "ab");
+    }
+
+    // C2 gate: `f`/`t`/`F`/`T` (Find) vs the dedicated char-search commands.
+
+    #[test]
+    fn cut_find_forward_on_matches_cut_right_until() {
+        // df b
+        equivalent(
+            "foo bar baz",
+            0,
+            &EditCommand::Cut(find('b', Direction::Forward, FindStop::On)),
+            &EditCommand::CutRightUntil('b'),
+        );
+    }
+
+    #[test]
+    fn cut_find_forward_before_matches_cut_right_before() {
+        // dt b
+        equivalent(
+            "foo bar baz",
+            0,
+            &EditCommand::Cut(find('b', Direction::Forward, FindStop::Before)),
+            &EditCommand::CutRightBefore('b'),
+        );
+    }
+
+    #[test]
+    fn cut_find_backward_on_matches_cut_left_until() {
+        // dF o (cursor at end of buffer)
+        equivalent(
+            "foo bar baz",
+            11,
+            &EditCommand::Cut(find('o', Direction::Backward, FindStop::On)),
+            &EditCommand::CutLeftUntil('o'),
+        );
+    }
+
+    #[test]
+    fn cut_find_backward_before_matches_cut_left_before() {
+        // dT o
+        equivalent(
+            "foo bar baz",
+            11,
+            &EditCommand::Cut(find('o', Direction::Backward, FindStop::Before)),
+            &EditCommand::CutLeftBefore('o'),
+        );
+    }
+
+    #[test]
+    fn cut_find_absent_char_is_noop() {
+        equivalent(
+            "foo bar",
+            0,
+            &EditCommand::Cut(find('z', Direction::Forward, FindStop::On)),
+            &EditCommand::CutRightUntil('z'),
+        );
+    }
+
+    #[test]
+    fn copy_find_forward_matches_copy_right_until() {
+        equivalent(
+            "foo bar baz",
+            0,
+            &EditCommand::Copy(find('b', Direction::Forward, FindStop::On)),
+            &EditCommand::CopyRightUntil('b'),
+        );
+    }
+
+    #[test]
+    fn move_find_forward_matches_move_right_until() {
+        // Guards the `f`-vs-`;` two-path divergence: bare `f` (which will emit
+        // `Move(Find)`) must land where the replay path `;` lands — and `;`
+        // keeps using `MoveRightUntil`.
+        equivalent(
+            "foo bar baz",
+            0,
+            &EditCommand::Move(find('b', Direction::Forward, FindStop::On)),
+            &EditCommand::MoveRightUntil {
+                c: 'b',
+                select: false,
+            },
+        );
     }
 }

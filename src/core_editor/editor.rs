@@ -1,7 +1,7 @@
 use super::{edit_stack::EditStack, Clipboard, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
-use crate::core_editor::{commit, operator_span, resolve_motion, RestPolicy};
+use crate::core_editor::{commit, line, operator_span, resolve_motion, RestPolicy};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -30,6 +30,10 @@ pub struct Editor {
 enum OperatorVerb {
     Cut,
     Copy,
+    /// Cut, but a `LineWise` span keeps its line terminators so one blank line
+    /// remains — vi's change operator (`cc`/`cj`/`cgg`). Identical to `Cut`
+    /// for `CharWise` spans.
+    Change,
     Erase,
 }
 
@@ -107,6 +111,13 @@ impl Editor {
             } => {
                 let sel = operator_span(self.get_buffer(), self.insertion_point(), *target);
                 self.operate(sel, OperatorVerb::Copy, *granularity);
+            }
+            EditCommand::Change {
+                target,
+                granularity,
+            } => {
+                let sel = operator_span(self.get_buffer(), self.insertion_point(), *target);
+                self.operate(sel, OperatorVerb::Change, *granularity);
             }
             EditCommand::Erase(t) => {
                 let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
@@ -272,19 +283,27 @@ impl Editor {
             Granularity::CharWise => selection.start()..selection.end(),
             Granularity::LineWise => {
                 let buf = self.get_buffer();
-                let mut s = buf[..selection.start()].rfind('\n').map_or(0, |i| i + 1);
-                let e = buf[selection.end()..]
-                    .find('\n')
-                    .map_or(buf.len(), |i| selection.end() + i + 1);
-                if e == buf.len() && s > 0 {
-                    s -= 1;
+                let s = line::start_of_line(buf, selection.start());
+                match verb {
+                    // Change keeps the line terminators: only the lines'
+                    // content is consumed, so one blank line remains for the
+                    // re-entered insert mode.
+                    OperatorVerb::Change => s..line::end_of_line(buf, selection.end()),
+                    // Cut/Copy/Erase consume whole lines including the trailing
+                    // `\n`; on the last line (no trailing `\n`) eat the
+                    // *preceding* one instead so no stray blank line is left.
+                    _ => {
+                        let e = line::start_of_next_line(buf, selection.end())
+                            .unwrap_or(buf.len());
+                        let s = if e == buf.len() && s > 0 { s - 1 } else { s };
+                        s..e
+                    }
                 }
-                s..e
             }
         };
 
         match verb {
-            OperatorVerb::Cut => self.cut_range_with(range, granularity),
+            OperatorVerb::Cut | OperatorVerb::Change => self.cut_range_with(range, granularity),
             OperatorVerb::Copy => self.copy_range_with(range, granularity),
             OperatorVerb::Erase => {
                 self.line_buffer.clear_range_safe(range.clone());
@@ -475,6 +494,12 @@ impl Editor {
         self.edit_stack.insert(self.line_buffer.clone());
         self.last_undo_behavior = undo_behavior;
     }
+
+    // The dedicated `*Linewise` cut/copy methods below back the legacy public
+    // `EditCommand` variants only — every builtin binding now lowers through
+    // `operate` + `Granularity::LineWise` (with the `Change` verb covering the
+    // `leave_blank_line` flavor). Linewise span fixes belong in `operate` /
+    // `core_editor::line`, not here.
 
     fn cut_current_line(&mut self) {
         let deletion_range = self.line_buffer.current_line_range();
@@ -756,6 +781,9 @@ impl Editor {
     fn select_all(&mut self) {
         let end = self.line_buffer.len();
         self.line_buffer.set_cursor(Cursor::new(0, end));
+        // Capture inclusivity exactly like an anchor planted on the motion
+        // path, so a later mode switch can't change the selected span.
+        self.selection_inclusive = Some(self.edit_mode.rest_policy() == RestPolicy::OnGrapheme);
     }
 
     #[cfg(feature = "system_clipboard")]
@@ -799,9 +827,9 @@ impl Editor {
         let cursor = self.line_buffer.cursor();
 
         // Inclusivity was captured (via the rest policy) when the selection was
-        // created, so a later mode switch doesn't change the operated range. Fall
-        // back to the current policy for anchors planted outside the motion path
-        // (e.g. `select_all`).
+        // created, so a later mode switch doesn't change the operated range. The
+        // fallback to the current policy covers anchors that bypassed every
+        // planting path (e.g. a selection restored by undo/redo).
         let inclusive = self
             .selection_inclusive
             .unwrap_or_else(|| self.edit_mode.rest_policy() == RestPolicy::OnGrapheme);
@@ -1439,6 +1467,17 @@ mod test {
         assert_eq!(editor.get_selection(), Some((3, 5))); // one grapheme, not two
     }
 
+    #[test]
+    fn select_all_captures_inclusivity_at_plant_time() {
+        // `select_all` plants its anchor outside the motion path; it must still
+        // capture inclusivity, so a later mode switch (vi normal → insert here)
+        // can't shrink the selection by the final grapheme.
+        let mut editor = vi_editor("hello", PromptViMode::Normal);
+        editor.run_edit_command(&EditCommand::SelectAll);
+        editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Insert));
+        assert_eq!(editor.get_selection(), Some((0, 5)));
+    }
+
     // --- granularity gate -------------------------------------------------
     //
     // dd/dgg/dG/yy (and the cgg/cG blank-line variant) currently lower to
@@ -1571,6 +1610,150 @@ mod test {
         let (content, gran) = editor.cut_buffer.get();
         assert_eq!(content, "aaa\nbbb\n");
         assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_line_down_on_last_line_cuts_only_that_line() {
+        // `dj` on the last line: the motion stays put (no line below), so the
+        // linewise snap consumes just the current line — including its
+        // *leading* `\n` (the buffer-end fixup), leaving no stray blank line.
+        let mut editor = editor_with("aaa\nbbb\nccc");
+        editor.move_to_position(9, false); // inside "ccc"
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\nbbb");
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "\nccc");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_line_up_on_first_line_cuts_only_that_line() {
+        // `dk` on the first line: no line above, so only the current line goes.
+        let mut editor = editor_with("aaa\nbbb\nccc");
+        editor.move_to_position(1, false);
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Backward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "bbb\nccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\n");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_line_down_on_single_line_buffer_empties_it() {
+        let mut editor = editor_with("aaa");
+        editor.move_to_position(1, false);
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "");
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    // --- the Change verb (vi linewise change: `cc`/`cj`/`cgg`/`cG`) ---------
+    //
+    // Change is Cut with the LineWise snap keeping the line terminators: the
+    // spanned lines' *content* is consumed and one blank line remains for the
+    // re-entered insert mode. The register is tagged LineWise like vim's.
+
+    #[test]
+    fn change_lineedge_linewise_blanks_current_line() {
+        // `cc` from "bbb": content gone, blank line kept, cursor at its start.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Change {
+            target: MotionTarget::LineEdge(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\n\nccc");
+        assert_eq!(editor.insertion_point(), 4);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn change_line_down_blanks_current_and_next() {
+        // `cj` from "bbb": bbb + ccc collapse into one blank line.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Change {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\n");
+        assert_eq!(editor.insertion_point(), 4);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb\nccc");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn change_line_up_blanks_current_and_prev() {
+        // `ck` from "bbb": aaa + bbb collapse into one blank line.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Change {
+            target: MotionTarget::Line(Direction::Backward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "\nccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\nbbb");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn change_bufferedge_back_matches_legacy_leave_blank_command() {
+        // `cgg` — must reproduce `CutFromStartLinewise { leave_blank_line: true }`
+        // (the golden master above) exactly.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Change {
+            target: MotionTarget::BufferEdge(Direction::Backward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "\nccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\nbbb");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn change_bufferedge_fwd_matches_legacy_leave_blank_command() {
+        // `cG` — must reproduce `CutToEndLinewise { leave_blank_line: true }`:
+        // no buffer-end fixup; the preceding `\n` stays so a blank line remains.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Change {
+            target: MotionTarget::BufferEdge(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\n");
+        assert_eq!(editor.insertion_point(), 4);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb\nccc");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn change_charwise_behaves_like_cut() {
+        // For CharWise spans Change and Cut are the same operator.
+        let mut editor = linewise_editor(); // cursor 5, inside "bbb"
+        editor.run_edit_command(&EditCommand::Change {
+            target: MotionTarget::LineEdge(Direction::Forward),
+            granularity: Granularity::CharWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\nb\nccc"); // removed "bb"
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bb");
+        assert_eq!(gran, Granularity::CharWise);
     }
 
     #[test]

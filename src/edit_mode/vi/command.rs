@@ -241,7 +241,12 @@ impl Command {
             Self::PrependToStart => vec![ReedlineOption::Edit(EditCommand::MoveToLineStart {
                 select: false,
             })],
-            Self::RewriteCurrentLine => vec![ReedlineOption::Edit(EditCommand::CutCurrentLine)],
+            // `S` ≡ `cc` (vim): change the whole line, keeping the blank line
+            // for insert mode and filling the register linewise.
+            Self::RewriteCurrentLine => vec![ReedlineOption::Edit(EditCommand::Change {
+                target: MotionTarget::LineEdge(Direction::Forward),
+                granularity: Granularity::LineWise,
+            })],
             Self::DeleteChar => {
                 if vi_state.mode == ViMode::Visual {
                     vec![ReedlineOption::Edit(EditCommand::CutSelection)]
@@ -364,20 +369,13 @@ impl Command {
                 )]),
                 Motion::Left => Some(vec![ReedlineOption::Edit(EditCommand::Backspace)]),
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::Delete)]),
-                // `dj`/`dk` — current line plus the line below/above, linewise.
-                Motion::Down => Some(vec![ReedlineOption::Edit(EditCommand::Cut {
-                    target: MotionTarget::Line(Direction::Forward),
-                    granularity: Granularity::LineWise,
-                })]),
-                Motion::Up => Some(vec![ReedlineOption::Edit(EditCommand::Cut {
-                    target: MotionTarget::Line(Direction::Backward),
-                    granularity: Granularity::LineWise,
-                })]),
-                // `dgg`/`dG` — whole lines to the buffer edge, linewise. The
-                // `BufferEdge` target + the LineWise snap (incl. the buffer-end
-                // `\n` fixup) reproduce the dedicated `*Linewise` commands.
-                Motion::FirstLine | Motion::LastLine => {
-                    let target = motion.target().expect("gg/G resolve to a BufferEdge");
+                // `dj`/`dk`/`dgg`/`dG` — whole lines to the adjacent line or the
+                // buffer edge, linewise. The targets + the LineWise snap (incl.
+                // the buffer-end `\n` fixup) reproduce the dedicated commands.
+                Motion::Down | Motion::Up | Motion::FirstLine | Motion::LastLine => {
+                    let target = motion
+                        .target()
+                        .expect("linewise motions resolve to a target");
                     Some(vec![ReedlineOption::Edit(EditCommand::Cut {
                         target,
                         granularity: Granularity::LineWise,
@@ -398,10 +396,13 @@ impl Command {
             },
             Self::Change => {
                 let op = match motion {
-                    Motion::Line => Some(vec![
-                        ReedlineOption::Edit(EditCommand::MoveToLineStart { select: false }),
-                        ReedlineOption::Edit(EditCommand::CutToLineEnd),
-                    ]),
+                    // `cc` — change the whole line: its content is cut (the
+                    // blank line remains for insert mode) and the register is
+                    // filled linewise, so `p` after `cc` pastes as a line.
+                    Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::Change {
+                        target: MotionTarget::LineEdge(Direction::Forward),
+                        granularity: Granularity::LineWise,
+                    })]),
                     // `cw`/`cW` act like `ce`/`cE`: change to the word *end*, not the
                     // next word's start. Other word and line-edge motions (`c$`/`c0`)
                     // use their own target.
@@ -440,18 +441,17 @@ impl Command {
                     )]),
                     Motion::Left => Some(vec![ReedlineOption::Edit(EditCommand::Backspace)]),
                     Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::Delete)]),
-                    Motion::Up => None,
-                    Motion::Down => None,
-                    // `cgg`/`cG` are linewise (whole-line change) — see the note
-                    // in the `Delete` arm; they stay on the dedicated commands.
-                    Motion::FirstLine => Some(vec![ReedlineOption::Edit(
-                        EditCommand::CutFromStartLinewise {
-                            leave_blank_line: true,
-                        },
-                    )]),
-                    Motion::LastLine => {
-                        Some(vec![ReedlineOption::Edit(EditCommand::CutToEndLinewise {
-                            leave_blank_line: true,
+                    // `cj`/`ck`/`cgg`/`cG` — linewise change: the spanned lines'
+                    // content is cut, one blank line remains, and insert mode
+                    // re-enters on it (`Change`'s LineWise snap keeps the
+                    // terminators where `Cut`'s consumes them).
+                    Motion::Down | Motion::Up | Motion::FirstLine | Motion::LastLine => {
+                        let target = motion
+                            .target()
+                            .expect("linewise motions resolve to a target");
+                        Some(vec![ReedlineOption::Edit(EditCommand::Change {
+                            target,
+                            granularity: Granularity::LineWise,
                         })])
                     }
                     Motion::ReplayCharSearch => vi_state.last_char_search.map(|target| {
@@ -509,18 +509,12 @@ impl Command {
                 )]),
                 Motion::Left => Some(vec![ReedlineOption::Edit(EditCommand::CopyLeft)]),
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::CopyRight)]),
-                // `yj`/`yk` — current line plus the line below/above, linewise.
-                Motion::Down => Some(vec![ReedlineOption::Edit(EditCommand::Copy {
-                    target: MotionTarget::Line(Direction::Forward),
-                    granularity: Granularity::LineWise,
-                })]),
-                Motion::Up => Some(vec![ReedlineOption::Edit(EditCommand::Copy {
-                    target: MotionTarget::Line(Direction::Backward),
-                    granularity: Granularity::LineWise,
-                })]),
-                // `ygg`/`yG` — whole lines to the buffer edge, linewise.
-                Motion::FirstLine | Motion::LastLine => {
-                    let target = motion.target().expect("gg/G resolve to a BufferEdge");
+                // `yj`/`yk`/`ygg`/`yG` — whole lines to the adjacent line or
+                // the buffer edge, linewise.
+                Motion::Down | Motion::Up | Motion::FirstLine | Motion::LastLine => {
+                    let target = motion
+                        .target()
+                        .expect("linewise motions resolve to a target");
                     Some(vec![ReedlineOption::Edit(EditCommand::Copy {
                         target,
                         granularity: Granularity::LineWise,

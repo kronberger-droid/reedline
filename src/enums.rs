@@ -360,6 +360,18 @@ pub enum EditCommand {
         granularity: Granularity,
     },
 
+    /// Cut like [`EditCommand::Cut`], except that a `LineWise` span keeps its
+    /// line terminators: only the lines' *content* is consumed, so one blank
+    /// line remains — the vi change operator's linewise semantics
+    /// (`cc`/`cj`/`cgg`), which re-enter insert mode on that blank line.
+    /// Identical to `Cut` for `CharWise` spans.
+    Change {
+        /// Where the operator reaches to.
+        target: MotionTarget,
+        /// Char-wise span or whole lines.
+        granularity: Granularity,
+    },
+
     /// Erase the text between the cursor and a [`MotionTarget`] without touching
     /// the cut buffer (no-register counterpart of [`EditCommand::Cut`]).
     Erase(MotionTarget),
@@ -419,12 +431,20 @@ pub enum EditCommand {
     Complete,
 
     /// Cut the current line
+    ///
+    /// Legacy — prefer [`EditCommand::Cut`] with
+    /// [`MotionTarget::LineEdge`]`(Forward)` and [`Granularity::LineWise`],
+    /// which all builtin bindings lower through.
     CutCurrentLine,
 
     /// Cut from the start of the buffer to the insertion point
     CutFromStart,
 
     /// Cut from the start of the buffer to the line of insertion point
+    ///
+    /// Legacy — prefer [`EditCommand::Cut`] / [`EditCommand::Change`] (for
+    /// `leave_blank_line: true`) with [`MotionTarget::BufferEdge`]`(Backward)`
+    /// and [`Granularity::LineWise`], which all builtin bindings lower through.
     CutFromStartLinewise {
         /// When true, an empty line will remain after the operation
         leave_blank_line: bool,
@@ -440,6 +460,10 @@ pub enum EditCommand {
     CutToEnd,
 
     /// Cut from the line of insertion point to the end of the buffer
+    ///
+    /// Legacy — prefer [`EditCommand::Cut`] / [`EditCommand::Change`] (for
+    /// `leave_blank_line: true`) with [`MotionTarget::BufferEdge`]`(Forward)`
+    /// and [`Granularity::LineWise`], which all builtin bindings lower through.
     CutToEndLinewise {
         /// When true, an empty line will remain after the operation
         leave_blank_line: bool,
@@ -560,6 +584,9 @@ pub enum EditCommand {
     CopyFromStart,
 
     /// Copy from the start of the buffer to the line of insertion point
+    ///
+    /// Legacy — prefer [`EditCommand::Copy`] with
+    /// [`MotionTarget::BufferEdge`]`(Backward)` and [`Granularity::LineWise`].
     CopyFromStartLinewise,
 
     /// Copy from the start of the current line to the insertion point
@@ -572,6 +599,9 @@ pub enum EditCommand {
     CopyToEnd,
 
     /// Copy from the line of insertion point to the end of the buffer
+    ///
+    /// Legacy — prefer [`EditCommand::Copy`] with
+    /// [`MotionTarget::BufferEdge`]`(Forward)` and [`Granularity::LineWise`].
     CopyToEndLinewise,
 
     /// Copy from the insertion point to the end of the current line
@@ -783,14 +813,15 @@ impl EditCommand {
             | EditCommand::CopyAroundPair { .. }
             | EditCommand::CopyTextObject { .. } => EditType::NoOp,
 
-            // The five MotionTarget verbs. `Move`/`Extend` carry the old `select`
+            // The six MotionTarget verbs. `Move`/`Extend` carry the old `select`
             // bool in the verb itself (Extend must be `select: true` so the editor
-            // does not clear the selection it is extending). `Cut`/`Erase` mutate
-            // the buffer; `Copy` does not.
+            // does not clear the selection it is extending). `Cut`/`Change`/`Erase`
+            // mutate the buffer; `Copy` does not.
             EditCommand::Move(_) => EditType::MoveCursor { select: false },
             EditCommand::Extend(_) => EditType::MoveCursor { select: true },
             EditCommand::Cut { .. } => EditType::EditText,
             EditCommand::Copy { .. } => EditType::NoOp,
+            EditCommand::Change { .. } => EditType::EditText,
             EditCommand::Erase(_) => EditType::EditText,
         }
     }

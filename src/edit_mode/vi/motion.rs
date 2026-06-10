@@ -169,12 +169,17 @@ impl Motion {
     /// The [`MotionTarget`] this motion resolves to, for motions with a static
     /// target.
     ///
-    /// `None` for motions that have no fixed mapping: `h`/`l`, `j`/`k`, `^`, the
+    /// `None` for motions that have no fixed mapping: `h`/`l`, `^`, the
     /// doubled-operator `Line` (`dd`/`cc`/`yy`), and the `;`/`,` replays (whose
     /// target is the dynamic `last_char_search`). Those keep their own lowering.
     /// Every motion with a static target reads this one map on both the
     /// bare-motion path (`Move`/`Extend`) and the operator path (`Cut`/`Copy`),
     /// so its semantics live in a single place.
+    ///
+    /// `j`/`k` map to [`MotionTarget::Line`] for the *operator* path
+    /// (`dj`/`cj`/`yj` snap linewise); their bare-motion arms in
+    /// [`Motion::to_reedline`] never consult this map, because a bare `j`/`k`
+    /// is not a buffer motion at all — it lowers to menu/history events.
     pub(super) fn target(&self) -> Option<MotionTarget> {
         // A word target, spelled compactly.
         let word = |kind: WordKind, edge: WordEdge, direction: Direction| MotionTarget::Word {
@@ -224,6 +229,11 @@ impl Motion {
             }),
             Motion::FirstLine => Some(MotionTarget::BufferEdge(Direction::Backward)),
             Motion::LastLine => Some(MotionTarget::BufferEdge(Direction::Forward)),
+
+            // `j`/`k` — the adjacent line, for the operator path only (see the
+            // method docs; the bare-motion arms lower to events instead).
+            Motion::Down => Some(MotionTarget::Line(Direction::Forward)),
+            Motion::Up => Some(MotionTarget::Line(Direction::Backward)),
 
             // Not yet lowered — keep the existing per-variant EditCommand path.
             _ => None,

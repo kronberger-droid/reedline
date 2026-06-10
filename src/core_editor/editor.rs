@@ -1,11 +1,11 @@
-use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer};
+use super::{edit_stack::EditStack, Clipboard, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::{commit, operator_span, resolve_motion, RestPolicy};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
-use crate::{Direction, MotionTarget};
+use crate::{Direction, Granularity, MotionTarget};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
 
@@ -191,7 +191,7 @@ impl Editor {
                 let range = self.line_buffer.current_line_range();
                 let copy_slice = &self.line_buffer.get_buffer()[range];
                 if !copy_slice.is_empty() {
-                    self.cut_buffer.set(copy_slice, ClipboardMode::Lines);
+                    self.cut_buffer.set(copy_slice, Granularity::LineWise);
                 }
             }
             EditCommand::CopyLeft => {
@@ -201,7 +201,7 @@ impl Editor {
                     let copy_range = left_index..insertion_offset;
                     self.cut_buffer.set(
                         &self.line_buffer.get_buffer()[copy_range],
-                        ClipboardMode::Normal,
+                        Granularity::CharWise,
                     );
                 }
             }
@@ -212,7 +212,7 @@ impl Editor {
                     let copy_range = insertion_offset..right_index;
                     self.cut_buffer.set(
                         &self.line_buffer.get_buffer()[copy_range],
-                        ClipboardMode::Normal,
+                        Granularity::CharWise,
                     );
                 }
             }
@@ -461,7 +461,7 @@ impl Editor {
 
         let cut_slice = &self.line_buffer.get_buffer()[deletion_range.clone()];
         if !cut_slice.is_empty() {
-            self.cut_buffer.set(cut_slice, ClipboardMode::Lines);
+            self.cut_buffer.set(cut_slice, Granularity::LineWise);
             self.line_buffer.set_insertion_point(deletion_range.start);
             self.line_buffer.clear_range(deletion_range);
         }
@@ -472,7 +472,7 @@ impl Editor {
         if insertion_offset > 0 {
             self.cut_buffer.set(
                 &self.line_buffer.get_buffer()[..insertion_offset],
-                ClipboardMode::Normal,
+                Granularity::CharWise,
             );
             self.line_buffer.clear_to_insertion_point();
         }
@@ -494,7 +494,7 @@ impl Editor {
         if end_offset > 0 {
             self.cut_buffer.set(
                 &self.line_buffer.get_buffer()[..end_offset],
-                ClipboardMode::Lines,
+                Granularity::LineWise,
             );
             self.line_buffer.clear_range(..end_offset);
             self.line_buffer.move_to_start();
@@ -507,7 +507,7 @@ impl Editor {
         let deletion_range = self.line_buffer.insertion_point()..previous_offset;
         let cut_slice = &self.line_buffer.get_buffer()[deletion_range.clone()];
         if !cut_slice.is_empty() {
-            self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
+            self.cut_buffer.set(cut_slice, Granularity::CharWise);
             self.line_buffer.clear_range(deletion_range);
         }
     }
@@ -523,7 +523,7 @@ impl Editor {
     fn cut_from_end(&mut self) {
         let cut_slice = &self.line_buffer.get_buffer()[self.line_buffer.insertion_point()..];
         if !cut_slice.is_empty() {
-            self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
+            self.cut_buffer.set(cut_slice, Granularity::CharWise);
             self.line_buffer.clear_to_end();
         }
     }
@@ -543,7 +543,7 @@ impl Editor {
 
         let cut_slice = &self.line_buffer.get_buffer()[start_offset..];
         if !cut_slice.is_empty() {
-            self.cut_buffer.set(cut_slice, ClipboardMode::Lines);
+            self.cut_buffer.set(cut_slice, Granularity::LineWise);
             self.line_buffer.set_insertion_point(start_offset);
             self.line_buffer.clear_to_end();
         }
@@ -553,7 +553,7 @@ impl Editor {
         let cut_slice = &self.line_buffer.get_buffer()
             [self.line_buffer.insertion_point()..self.line_buffer.find_current_line_end()];
         if !cut_slice.is_empty() {
-            self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
+            self.cut_buffer.set(cut_slice, Granularity::CharWise);
             self.line_buffer.clear_to_line_end();
         }
     }
@@ -620,11 +620,11 @@ impl Editor {
     fn insert_cut_buffer_after(&mut self) {
         self.delete_selection();
         match self.cut_buffer.get() {
-            (content, ClipboardMode::Normal) => {
+            (content, Granularity::CharWise) => {
                 self.line_buffer.move_right();
                 self.line_buffer.insert_str(&content);
             }
-            (mut content, ClipboardMode::Lines) => {
+            (mut content, Granularity::LineWise) => {
                 // TODO: Simplify that?
                 self.line_buffer.move_to_line_start();
                 self.line_buffer.move_line_down();
@@ -676,7 +676,7 @@ impl Editor {
                 &self.line_buffer.get_buffer()[self.line_buffer.insertion_point()..index + extra];
 
             if !cut_slice.is_empty() {
-                self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
+                self.cut_buffer.set(cut_slice, Granularity::CharWise);
 
                 if before_char {
                     self.line_buffer.delete_right_before_char(c, current_line);
@@ -696,7 +696,7 @@ impl Editor {
                 &self.line_buffer.get_buffer()[index + extra..self.line_buffer.insertion_point()];
 
             if !cut_slice.is_empty() {
-                self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
+                self.cut_buffer.set(cut_slice, Granularity::CharWise);
 
                 if before_char {
                     self.line_buffer.delete_left_before_char(c, current_line);
@@ -742,7 +742,7 @@ impl Editor {
     fn cut_selection_to_system(&mut self) {
         if let Some((start, end)) = self.get_selection() {
             let cut_slice = &self.line_buffer.get_buffer()[start..end];
-            self.system_clipboard.set(cut_slice, ClipboardMode::Normal);
+            self.system_clipboard.set(cut_slice, Granularity::CharWise);
             self.cut_range(start..end);
             self.clear_selection();
         }
@@ -759,14 +759,14 @@ impl Editor {
     fn copy_selection_to_system(&mut self) {
         if let Some((start, end)) = self.get_selection() {
             let cut_slice = &self.line_buffer.get_buffer()[start..end];
-            self.system_clipboard.set(cut_slice, ClipboardMode::Normal);
+            self.system_clipboard.set(cut_slice, Granularity::CharWise);
         }
     }
 
     fn copy_selection_to_cut_buffer(&mut self) {
         if let Some((start, end)) = self.get_selection() {
             let cut_slice = &self.line_buffer.get_buffer()[start..end];
-            self.cut_buffer.set(cut_slice, ClipboardMode::Normal);
+            self.cut_buffer.set(cut_slice, Granularity::CharWise);
         }
     }
 
@@ -903,7 +903,7 @@ impl Editor {
     fn copy_range(&mut self, range: Range<usize>) {
         if range.start < range.end {
             let slice = &self.line_buffer.get_buffer()[range];
-            self.cut_buffer.set(slice, ClipboardMode::Normal);
+            self.cut_buffer.set(slice, Granularity::CharWise);
         }
     }
 
@@ -1053,7 +1053,7 @@ impl Editor {
         if insertion_offset > 0 {
             self.cut_buffer.set(
                 &self.line_buffer.get_buffer()[..insertion_offset],
-                ClipboardMode::Normal,
+                Granularity::CharWise,
             );
         }
     }
@@ -1066,7 +1066,7 @@ impl Editor {
         if end_offset > 0 {
             self.cut_buffer.set(
                 &self.line_buffer.get_buffer()[..end_offset],
-                ClipboardMode::Lines,
+                Granularity::LineWise,
             );
         }
         self.line_buffer.move_to_start();
@@ -1104,7 +1104,7 @@ impl Editor {
         let copy_range = self.line_buffer.insertion_point()..self.line_buffer.len();
         if copy_range.start < copy_range.end {
             let slice = &self.line_buffer.get_buffer()[copy_range];
-            self.cut_buffer.set(slice, ClipboardMode::Lines);
+            self.cut_buffer.set(slice, Granularity::LineWise);
         }
     }
 
@@ -1221,10 +1221,10 @@ impl Editor {
 
 fn insert_clipboard_content_before(line_buffer: &mut LineBuffer, clipboard: &mut dyn Clipboard) {
     match clipboard.get() {
-        (content, ClipboardMode::Normal) => {
+        (content, Granularity::CharWise) => {
             line_buffer.insert_str(&content);
         }
-        (mut content, ClipboardMode::Lines) => {
+        (mut content, Granularity::LineWise) => {
             // TODO: Simplify that?
             line_buffer.move_to_line_start();
             line_buffer.move_line_up();
@@ -1416,7 +1416,7 @@ mod test {
     // dd/dgg/dG/yy (and the cgg/cG blank-line variant) currently lower to
     // dedicated linewise commands. The granularity axis will re-lower them
     // through the operator verbs; these golden masters pin the exact buffer,
-    // cursor, cut content, and — crucially — the `ClipboardMode::Lines` register
+    // cursor, cut content, and — crucially — the `Granularity::LineWise` register
     // tag (what makes paste linewise) so the re-lowering stays behavior-preserving.
     // Buffer "aaa\nbbb\nccc": a@0..3, \n@3, b@4..7, \n@7, c@8..11; cursor in "bbb".
 
@@ -1434,7 +1434,7 @@ mod test {
         assert_eq!(editor.insertion_point(), 4);
         let (content, mode) = editor.cut_buffer.get();
         assert_eq!(content, "bbb\n");
-        assert!(matches!(mode, ClipboardMode::Lines));
+        assert!(matches!(mode, Granularity::LineWise));
     }
 
     #[test]
@@ -1447,7 +1447,7 @@ mod test {
         assert_eq!(editor.insertion_point(), 0);
         let (content, mode) = editor.cut_buffer.get();
         assert_eq!(content, "aaa\nbbb\n");
-        assert!(matches!(mode, ClipboardMode::Lines));
+        assert!(matches!(mode, Granularity::LineWise));
     }
 
     #[test]
@@ -1460,7 +1460,7 @@ mod test {
         assert_eq!(editor.insertion_point(), 0);
         let (content, mode) = editor.cut_buffer.get();
         assert_eq!(content, "aaa\nbbb");
-        assert!(matches!(mode, ClipboardMode::Lines));
+        assert!(matches!(mode, Granularity::LineWise));
     }
 
     #[test]
@@ -1473,7 +1473,7 @@ mod test {
         assert_eq!(editor.insertion_point(), 3);
         let (content, mode) = editor.cut_buffer.get();
         assert_eq!(content, "\nbbb\nccc");
-        assert!(matches!(mode, ClipboardMode::Lines));
+        assert!(matches!(mode, Granularity::LineWise));
     }
 
     #[test]
@@ -1483,7 +1483,7 @@ mod test {
         assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc"); // unchanged
         let (content, mode) = editor.cut_buffer.get();
         assert_eq!(content, "bbb\n");
-        assert!(matches!(mode, ClipboardMode::Lines));
+        assert!(matches!(mode, Granularity::LineWise));
     }
 
     #[rstest]

@@ -10,7 +10,7 @@ mod word;
 
 #[cfg(feature = "system_clipboard")]
 pub(crate) use clip_buffer::get_system_clipboard;
-pub(crate) use clip_buffer::{get_local_clipboard, Clipboard, ClipboardMode};
+pub(crate) use clip_buffer::{get_local_clipboard, Clipboard};
 pub(crate) use cursor::Cursor;
 pub use editor::Editor;
 pub use line_buffer::LineBuffer;

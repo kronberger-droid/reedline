@@ -27,6 +27,12 @@ pub struct Editor {
     edit_mode: PromptEditMode,
 }
 
+enum OperatorVerb {
+    Cut,
+    Copy,
+    Erase,
+}
+
 impl Default for Editor {
     fn default() -> Self {
         Editor {
@@ -89,17 +95,16 @@ impl Editor {
                 self.move_head_to(head, true);
             }
             EditCommand::Cut(t) => {
-                let range = self.motion_range(*t);
-                self.cut_range(range);
+                let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
+                self.operate(sel, OperatorVerb::Cut);
             }
             EditCommand::Copy(t) => {
-                let range = self.motion_range(*t);
-                self.copy_range(range);
+                let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
+                self.operate(sel, OperatorVerb::Copy);
             }
             EditCommand::Erase(t) => {
-                let range = self.motion_range(*t);
-                self.line_buffer.clear_range_safe(range.clone());
-                self.line_buffer.set_insertion_point(range.start);
+                let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
+                self.operate(sel, OperatorVerb::Erase);
             }
             EditCommand::InsertChar(c) => self.insert_char(*c),
             EditCommand::Complete => {}
@@ -256,6 +261,18 @@ impl Editor {
         self.selection_inclusive = None;
     }
 
+    fn operate(&mut self, selection: Cursor, verb: OperatorVerb) {
+        let range = selection.start()..selection.end();
+        match verb {
+            OperatorVerb::Cut => self.cut_range(range),
+            OperatorVerb::Copy => self.copy_range(range),
+            OperatorVerb::Erase => {
+                self.line_buffer.clear_range_safe(range.clone());
+                self.line_buffer.set_insertion_point(range.start);
+            }
+        }
+    }
+
     /// When a fresh anchor is about to be planted, capture whether the selection
     /// is inclusive under the current rest policy. No-op when an anchor already
     /// exists or `select` is false.
@@ -310,16 +327,6 @@ impl Editor {
             target,
         )
         .head
-    }
-
-    /// The buffer range an operator (`Cut`/`Copy`/`Erase`) acts on for a motion
-    /// target, ascending. An inclusive motion (e.g. a forward word end) consumes
-    /// the grapheme it lands on, so the range runs one grapheme past it — the
-    /// inclusivity is data the resolver reports, not a per-target special case.
-    fn motion_range(&self, target: MotionTarget) -> Range<usize> {
-        let origin = self.insertion_point();
-        let span = operator_span(self.line_buffer.get_buffer(), origin, target);
-        span.start()..span.end()
     }
 
     /// Move the cursor head to `head` — collapsing the selection unless `select`
@@ -2575,6 +2582,35 @@ mod test {
         editor.run_edit_command(&EditCommand::Erase(word_start_fwd()));
         assert_eq!(editor.get_buffer(), "bar baz");
         assert_eq!(editor.insertion_point(), 0);
+        assert_eq!(editor.cut_buffer.get().0, ""); // register left untouched
+    }
+
+    #[test]
+    fn erase_find_forward_is_inclusive() {
+        // op_end (inclusive forward find) must reach Erase through `operate`:
+        // `dt`-style would stop short, but `Find { On }` eats through the 'b'.
+        let mut editor = editor_with("foo bar baz");
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Erase(find(
+            'b',
+            Direction::Forward,
+            FindStop::On,
+        )));
+        assert_eq!(editor.get_buffer(), "ar baz"); // removed "foo b"
+        assert_eq!(editor.insertion_point(), 0);
+        assert_eq!(editor.cut_buffer.get().0, ""); // register left untouched
+    }
+
+    #[test]
+    fn erase_grapheme_backward_over_multibyte() {
+        // backward span (origin > op_end) across a 2-byte grapheme.
+        let mut editor = editor_with("café"); // 'é' is [3,5)
+        editor.move_to_position(5, false);
+        editor.run_edit_command(&EditCommand::Erase(MotionTarget::Grapheme(
+            Direction::Backward,
+        )));
+        assert_eq!(editor.get_buffer(), "caf");
+        assert_eq!(editor.insertion_point(), 3);
         assert_eq!(editor.cut_buffer.get().0, ""); // register left untouched
     }
 

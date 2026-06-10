@@ -1,4 +1,4 @@
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 /// Byte index of the next grapheme boundary at or after `pos`.
 ///
@@ -34,34 +34,43 @@ pub fn prev_grapheme_boundary(buf: &str, pos: usize) -> usize {
 
 /// Whether `pos` sits on a grapheme boundary in `buf`.
 ///
-/// The start (`0`) and end (`buf.len()`) of the buffer are always boundaries —
-/// they must be checked explicitly because `grapheme_indices` only yields
-/// grapheme *start* offsets, and `buf.len()` is never a start (nor is `0` for
-/// an empty buffer). Does not panic for off-boundary `pos`; it simply reports
-/// `false`.
+/// A local check via [`GraphemeCursor`] — the cursor is given the whole buffer
+/// as context, so it stays correct for context-sensitive sequences (combining
+/// marks, ZWJ emoji) while only examining the bytes around `pos`, never
+/// re-segmenting the buffer. Does not panic for off-boundary `pos`; it simply
+/// reports `false`.
+#[cfg(test)]
 fn is_grapheme_boundary(buf: &str, pos: usize) -> bool {
-    pos == 0 || pos == buf.len() || buf.grapheme_indices(true).any(|(i, _)| i == pos)
+    if pos == 0 || pos == buf.len() {
+        return true;
+    }
+    if !buf.is_char_boundary(pos) {
+        return false;
+    }
+    // Err is unreachable with the whole buffer as the single chunk.
+    GraphemeCursor::new(pos, buf.len(), true)
+        .is_boundary(buf, 0)
+        .unwrap_or(false)
 }
 
 /// Snaps `pos` down to the start of the grapheme that contains it (the floor),
 /// or returns `pos` unchanged when it already sits on a boundary.
 ///
 /// Total and idempotent — a no-op on an already-aligned position, and never
-/// panics (an off-boundary `pos` simply snaps to the enclosing grapheme start).
-/// Boundaries are computed from the *whole* buffer, so this stays correct for
-/// context-sensitive sequences (combining marks, ZWJ emoji) where the
-/// motion-oriented [`prev_grapheme_boundary`] — which re-segments a slice —
-/// would not.
+/// panics (an off-boundary `pos` simply snaps to the enclosing grapheme start;
+/// past-the-end clamps to `buf.len()`). Like [`is_grapheme_boundary`], a local
+/// [`GraphemeCursor`] check with whole-buffer context — correct for
+/// context-sensitive sequences without re-segmenting the buffer.
 pub(crate) fn ensure_grapheme_boundary_prev(buf: &str, pos: usize) -> usize {
-    if is_grapheme_boundary(buf, pos) {
-        pos
-    } else {
-        // largest grapheme start strictly before pos (pos is mid-grapheme here)
-        buf.grapheme_indices(true)
-            .map(|(i, _)| i)
-            .take_while(|&i| i < pos)
-            .last()
-            .unwrap_or(0)
+    // floor to a char boundary first so the cursor seed is valid
+    let mut pos = pos.min(buf.len());
+    while !buf.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    let mut cursor = GraphemeCursor::new(pos, buf.len(), true);
+    match cursor.is_boundary(buf, 0) {
+        Ok(true) => pos,
+        _ => cursor.prev_boundary(buf, 0).ok().flatten().unwrap_or(0),
     }
 }
 
@@ -69,20 +78,25 @@ pub(crate) fn ensure_grapheme_boundary_prev(buf: &str, pos: usize) -> usize {
 /// or returns `pos` unchanged when it already sits on a boundary.
 ///
 /// Total and idempotent — a no-op on an already-aligned position, and never
-/// panics (an off-boundary `pos` simply snaps to the enclosing grapheme end).
-/// Boundaries are computed from the *whole* buffer, so this stays correct for
-/// context-sensitive sequences (combining marks, ZWJ emoji) where the
-/// motion-oriented [`next_grapheme_boundary`] — which re-segments a slice —
-/// would not.
+/// panics (an off-boundary `pos` simply snaps to the enclosing grapheme end;
+/// past-the-end clamps to `buf.len()`). Like [`is_grapheme_boundary`], a local
+/// [`GraphemeCursor`] check with whole-buffer context — correct for
+/// context-sensitive sequences without re-segmenting the buffer.
 pub(crate) fn ensure_grapheme_boundary_next(buf: &str, pos: usize) -> usize {
-    if is_grapheme_boundary(buf, pos) {
-        pos
-    } else {
-        // smallest grapheme start strictly after pos, else end of buffer
-        buf.grapheme_indices(true)
-            .map(|(i, _)| i)
-            .find(|&i| i > pos)
-            .unwrap_or(buf.len())
+    // ceil to a char boundary first so the cursor seed is valid (`buf.len()`
+    // is always one, so this terminates)
+    let mut pos = pos.min(buf.len());
+    while !buf.is_char_boundary(pos) {
+        pos += 1;
+    }
+    let mut cursor = GraphemeCursor::new(pos, buf.len(), true);
+    match cursor.is_boundary(buf, 0) {
+        Ok(true) => pos,
+        _ => cursor
+            .next_boundary(buf, 0)
+            .ok()
+            .flatten()
+            .unwrap_or(buf.len()),
     }
 }
 

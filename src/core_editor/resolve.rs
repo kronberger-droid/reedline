@@ -1,23 +1,31 @@
 use crate::{
     core_editor::{
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
-        word,
+        word, Cursor,
     },
     enums::{Direction, MotionTarget, WordEdge},
     FindStop,
 };
 
-/// A resolved motion: where the cursor head lands, and whether an operator
-/// acting over it consumes the grapheme at `head`.
+/// A resolved motion, as two byte positions:
+/// - `head` — where the cursor lands (used by `Move`/`Extend`).
+/// - `op_end` — the far edge an operator consumes (used by `Cut`/`Copy`/`Erase`).
 ///
-/// `inclusive` is vim's inclusive-vs-exclusive *motion* classification — a
-/// property of the motion itself (e.g. a word *end* is inclusive), which
-/// operators honor. The cursor lands on `head` either way; only an operator's
-/// range extends one grapheme further when `inclusive`.
+/// They differ only for *inclusive* motions: a forward word-end (`e`) or find
+/// (`f`/`t`) lands the cursor *on* a grapheme, but an operator eats it — so
+/// `op_end` is one grapheme past `head`. For exclusive motions `op_end == head`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Movement {
     pub(crate) head: usize,
-    pub(crate) inclusive: bool,
+    pub(crate) op_end: usize,
+}
+
+/// The span an operator (`Cut`/`Copy`/`Erase`) acts over: a [`Cursor`] from
+/// `origin` to the motion's `op_end`. `start()..end()` is the byte range to
+/// consume — inclusivity and direction are already baked into `op_end`, so the
+/// operator never has to reconsider them.
+pub(crate) fn operator_span(buf: &str, origin: usize, target: MotionTarget) -> Cursor {
+    Cursor::new(origin, resolve_motion(buf, origin, target).op_end)
 }
 
 /// Resolve a public [`MotionTarget`] against `buf`, relative to `origin`.
@@ -27,35 +35,40 @@ pub(crate) struct Movement {
 /// or another mode can never crash the editor. Context-aware (takes `buf`), so
 /// line/buffer edges resolve correctly where a context-free conversion couldn't.
 pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> Movement {
-    let exclusive = |head| Movement {
+    let span = |head: usize, inclusive: bool| Movement {
         head,
-        inclusive: false,
+        op_end: if inclusive {
+            next_grapheme_boundary(buf, head)
+        } else {
+            head
+        },
     };
     match target {
         MotionTarget::Grapheme(Direction::Forward) => {
-            exclusive(next_grapheme_boundary(buf, origin))
+            span(next_grapheme_boundary(buf, origin), false)
         }
         MotionTarget::Grapheme(Direction::Backward) => {
-            exclusive(prev_grapheme_boundary(buf, origin))
+            span(prev_grapheme_boundary(buf, origin), false)
         }
         MotionTarget::Word {
             kind,
             edge,
             direction,
-        } => Movement {
-            head: word::locate_word(buf, origin, kind, edge, direction == Direction::Forward),
-            // A word *end* is the word's last grapheme; operating to it consumes
-            // that grapheme (vim classifies `e`/`E` as inclusive).
-            inclusive: edge == WordEdge::End && direction == Direction::Forward,
-        },
-        MotionTarget::Offset(n) => exclusive(n.min(buf.len())),
-        MotionTarget::BufferEdge(Direction::Backward) => exclusive(0),
-        MotionTarget::BufferEdge(Direction::Forward) => exclusive(buf.len()),
+        } => {
+            let head = word::locate_word(buf, origin, kind, edge, direction == Direction::Forward);
+            let inclusive = edge == WordEdge::End && direction == Direction::Forward;
+            span(head, inclusive)
+        }
+        MotionTarget::Offset(n) => span(n.min(buf.len()), false),
+        MotionTarget::BufferEdge(Direction::Backward) => span(0, false),
+        MotionTarget::BufferEdge(Direction::Forward) => span(buf.len(), false),
         MotionTarget::LineEdge(Direction::Backward) => {
-            exclusive(buf[..origin].rfind('\n').map_or(0, |i| i + 1))
+            let head = buf[..origin].rfind('\n').map_or(0, |i| i + 1);
+            span(head, false)
         }
         MotionTarget::LineEdge(Direction::Forward) => {
-            exclusive(buf[origin..].find('\n').map_or(buf.len(), |i| origin + i))
+            let head = buf[origin..].find('\n').map_or(buf.len(), |i| origin + i);
+            span(head, false)
         }
         // Character search (vi `f`/`t`/`F`/`T`). A miss stays at `origin` (a
         // no-op) rather than panicking. Forward find is inclusive (`df` eats the
@@ -65,10 +78,9 @@ pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> 
             direction,
             stop,
         } => {
-            find_char(buf, origin, ch, direction, stop).map_or(exclusive(origin), |head| Movement {
-                head,
-                inclusive: direction == Direction::Forward,
-            })
+            let hit = find_char(buf, origin, ch, direction, stop);
+            let inclusive = hit.is_some() && direction == Direction::Forward;
+            span(hit.unwrap_or(origin), inclusive)
         }
     }
 }
@@ -112,18 +124,14 @@ mod tests {
     #[test]
     fn resolve_motion_marks_forward_word_end_inclusive() {
         // Only a forward word *end* is inclusive; starts and backward motions are not.
+        // forward word-end is inclusive: lands on the last 'o' (2), op_end one past (3)
         let m = resolve_motion("foo bar", 0, word(WordEdge::End, Direction::Forward));
-        assert_eq!(
-            m,
-            Movement {
-                head: 2,
-                inclusive: true
-            }
-        ); // on the last 'o'
+        assert_eq!(m, Movement { head: 2, op_end: 3 });
+        // starts and backward motions are exclusive: op_end == head
         let m = resolve_motion("foo bar", 0, word(WordEdge::Start, Direction::Forward));
-        assert!(!m.inclusive);
+        assert_eq!(m.op_end, m.head);
         let m = resolve_motion("foo bar", 7, word(WordEdge::End, Direction::Backward));
-        assert!(!m.inclusive);
+        assert_eq!(m.op_end, m.head);
     }
 
     #[test]
@@ -166,10 +174,7 @@ mod tests {
         // Forward find is an inclusive motion (vim `f`/`t`).
         assert_eq!(
             resolve_motion("foo bar", 0, find('b', Direction::Forward, FindStop::On)),
-            Movement {
-                head: 4,
-                inclusive: true
-            }
+            Movement { head: 4, op_end: 5 } // inclusive: op_end one past 'b'
         );
     }
 
@@ -182,10 +187,7 @@ mod tests {
                 0,
                 find('b', Direction::Forward, FindStop::Before)
             ),
-            Movement {
-                head: 3,
-                inclusive: true
-            }
+            Movement { head: 3, op_end: 4 } // inclusive: op_end one past byte 3
         );
     }
 
@@ -195,10 +197,7 @@ mod tests {
         // Backward find is an exclusive motion (vim `F`/`T`).
         assert_eq!(
             resolve_motion("foo bar", 6, find('f', Direction::Backward, FindStop::On)),
-            Movement {
-                head: 0,
-                inclusive: false
-            }
+            Movement { head: 0, op_end: 0 } // backward is exclusive
         );
     }
 
@@ -212,10 +211,7 @@ mod tests {
                 6,
                 find('f', Direction::Backward, FindStop::Before)
             ),
-            Movement {
-                head: 1,
-                inclusive: false
-            }
+            Movement { head: 1, op_end: 1 } // backward is exclusive
         );
     }
 
@@ -235,10 +231,7 @@ mod tests {
         // Totality: an unfindable char is a no-op, never a panic.
         assert_eq!(
             resolve_motion("foo bar", 3, find('z', Direction::Forward, FindStop::On)),
-            Movement {
-                head: 3,
-                inclusive: false
-            }
+            Movement { head: 3, op_end: 3 } // miss: no-op at origin
         );
     }
 
@@ -291,10 +284,7 @@ mod tests {
         // `$` from inside the first line lands *at* the `\n`, not the buffer end.
         assert_eq!(
             resolve_motion("ab\ncd", 0, MotionTarget::LineEdge(Direction::Forward)),
-            Movement {
-                head: 2,
-                inclusive: false
-            }
+            Movement { head: 2, op_end: 2 } // line edge is exclusive
         );
     }
 

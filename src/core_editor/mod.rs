@@ -14,5 +14,5 @@ pub(crate) use clip_buffer::{get_local_clipboard, Clipboard, ClipboardMode};
 pub(crate) use cursor::Cursor;
 pub use editor::Editor;
 pub use line_buffer::LineBuffer;
-pub(crate) use resolve::resolve_motion;
+pub(crate) use resolve::{operator_span, resolve_motion};
 pub(crate) use rest_policy::{commit, RestPolicy};

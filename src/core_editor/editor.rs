@@ -1,8 +1,7 @@
 use super::{edit_stack::EditStack, Clipboard, ClipboardMode, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
-use crate::core_editor::graphemes::next_grapheme_boundary;
-use crate::core_editor::{commit, resolve_motion, RestPolicy};
+use crate::core_editor::{commit, operator_span, resolve_motion, RestPolicy};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -319,14 +318,8 @@ impl Editor {
     /// inclusivity is data the resolver reports, not a per-target special case.
     fn motion_range(&self, target: MotionTarget) -> Range<usize> {
         let origin = self.insertion_point();
-        let buffer = self.line_buffer.get_buffer();
-        let m = resolve_motion(buffer, origin, target);
-        let dest = if m.inclusive {
-            next_grapheme_boundary(buffer, m.head)
-        } else {
-            m.head
-        };
-        origin.min(dest)..origin.max(dest)
+        let span = operator_span(self.line_buffer.get_buffer(), origin, target);
+        span.start()..span.end()
     }
 
     /// Move the cursor head to `head` — collapsing the selection unless `select`

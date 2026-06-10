@@ -1,6 +1,6 @@
 use super::{motion::Motion, parser::ReedlineOption, ViMode};
 use crate::enums::{TextObject, TextObjectScope, TextObjectType};
-use crate::{EditCommand, Granularity, ReedlineEvent, Vi};
+use crate::{Direction, EditCommand, Granularity, MotionTarget, ReedlineEvent, Vi};
 use std::iter::Peekable;
 
 pub fn parse_command<'iter, I>(mode: ViMode, input: &mut Peekable<I>) -> Option<Command>
@@ -327,7 +327,11 @@ impl Command {
     ) -> Option<Vec<ReedlineOption>> {
         match self {
             Self::Delete => match motion {
-                Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::CutCurrentLine)]),
+                // `dd` — the whole current line, linewise.
+                Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                    target: MotionTarget::LineEdge(Direction::Forward),
+                    granularity: Granularity::LineWise,
+                })]),
                 // Word and line-edge motions lower through one parameterized verb:
                 // cut to the motion's target (`motion_range` makes `e`/`E` inclusive).
                 Motion::NextWord
@@ -362,17 +366,14 @@ impl Command {
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::Delete)]),
                 Motion::Up => None,
                 Motion::Down => None,
-                // `gg`/`G` are *linewise* as operators (whole-line cut), so they
-                // keep the dedicated linewise commands rather than the charwise
-                // `Cut(BufferEdge)`. They converge once the granularity axis lands.
-                Motion::FirstLine => Some(vec![ReedlineOption::Edit(
-                    EditCommand::CutFromStartLinewise {
-                        leave_blank_line: false,
-                    },
-                )]),
-                Motion::LastLine => {
-                    Some(vec![ReedlineOption::Edit(EditCommand::CutToEndLinewise {
-                        leave_blank_line: false,
+                // `dgg`/`dG` — whole lines to the buffer edge, linewise. The
+                // `BufferEdge` target + the LineWise snap (incl. the buffer-end
+                // `\n` fixup) reproduce the dedicated `*Linewise` commands.
+                Motion::FirstLine | Motion::LastLine => {
+                    let target = motion.target().expect("gg/G resolve to a BufferEdge");
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                        target,
+                        granularity: Granularity::LineWise,
                     })])
                 }
                 Motion::ReplayCharSearch => vi_state.last_char_search.map(|target| {
@@ -466,7 +467,11 @@ impl Command {
                 })
             }
             Self::Yank => match motion {
-                Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::CopyCurrentLine)]),
+                // `yy` — the whole current line, linewise.
+                Motion::Line => Some(vec![ReedlineOption::Edit(EditCommand::Copy {
+                    target: MotionTarget::LineEdge(Direction::Forward),
+                    granularity: Granularity::LineWise,
+                })]),
                 Motion::NextWord
                 | Motion::NextBigWord
                 | Motion::NextWordEnd
@@ -499,13 +504,13 @@ impl Command {
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::CopyRight)]),
                 Motion::Up => None,
                 Motion::Down => None,
-                // `ygg`/`yG` are linewise (whole-line yank) — see the note in the
-                // `Delete` arm; they stay on the dedicated commands.
-                Motion::FirstLine => Some(vec![ReedlineOption::Edit(
-                    EditCommand::CopyFromStartLinewise,
-                )]),
-                Motion::LastLine => {
-                    Some(vec![ReedlineOption::Edit(EditCommand::CopyToEndLinewise)])
+                // `ygg`/`yG` — whole lines to the buffer edge, linewise.
+                Motion::FirstLine | Motion::LastLine => {
+                    let target = motion.target().expect("gg/G resolve to a BufferEdge");
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy {
+                        target,
+                        granularity: Granularity::LineWise,
+                    })])
                 }
                 Motion::ReplayCharSearch => vi_state.last_char_search.map(|target| {
                     vec![ReedlineOption::Edit(EditCommand::Copy {

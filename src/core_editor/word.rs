@@ -77,13 +77,11 @@ pub(crate) fn locate_word(
         WordKind::Big => is_long_word_boundary,
     };
 
-    let chars: Vec<(usize, char)> = buf.char_indices().collect();
-
-    // Is char `i` the `edge` of a word? A word excludes whitespace/EOL, so its
-    // `Start` is a non-whitespace char with a boundary on its left (or buffer
-    // start), and its `End` one with a boundary on its right (or buffer end).
-    let is_target = |i: usize| -> bool {
-        let ch = chars[i].1;
+    // Is `ch` (with neighbors `before`/`after`, `None` at the buffer edges) the
+    // `edge` of a word? A word excludes whitespace/EOL, so its `Start` is a
+    // non-whitespace char with a boundary on its left (or the buffer start),
+    // and its `End` one with a boundary on its right (or the buffer end).
+    let is_target = |before: Option<char>, ch: char, after: Option<char>| -> bool {
         // A word excludes whitespace and line endings — use the module's own
         // classifier rather than a bare `is_whitespace` so `\n` (an `Eol`) is
         // handled by the same definition the boundary checks trust.
@@ -91,17 +89,28 @@ pub(crate) fn locate_word(
             return false;
         }
         match edge {
-            WordEdge::Start => i == 0 || is_boundary(chars[i - 1].1, ch),
-            WordEdge::End => i + 1 == chars.len() || is_boundary(ch, chars[i + 1].1),
+            WordEdge::Start => before.map_or(true, |b| is_boundary(b, ch)),
+            WordEdge::End => after.map_or(true, |a| is_boundary(ch, a)),
         }
     };
 
+    // Scan outward from the origin without materializing the buffer: each
+    // candidate's outer neighbor is read through `peek()`, its inner neighbor
+    // carried from the previous step (seeded with the char on the origin's
+    // other side).
     if forward {
         // first target strictly after origin
-        for (i, &(byte, _)) in chars.iter().enumerate() {
-            if byte > origin && is_target(i) {
+        let mut before = buf[..origin].chars().next_back();
+        let mut iter = buf[origin..]
+            .char_indices()
+            .map(|(i, c)| (origin + i, c))
+            .peekable();
+        while let Some((byte, ch)) = iter.next() {
+            let after = iter.peek().map(|&(_, c)| c);
+            if byte > origin && is_target(before, ch, after) {
                 return byte;
             }
+            before = Some(ch);
         }
         // none: `w` runs to the buffer end; `e` rests on the last grapheme
         match edge {
@@ -110,10 +119,14 @@ pub(crate) fn locate_word(
         }
     } else {
         // nearest target strictly before origin
-        for (i, &(byte, _)) in chars.iter().enumerate().rev() {
-            if byte < origin && is_target(i) {
+        let mut after = buf[origin..].chars().next();
+        let mut iter = buf[..origin].char_indices().rev().peekable();
+        while let Some((byte, ch)) = iter.next() {
+            let before = iter.peek().map(|&(_, c)| c);
+            if is_target(before, ch, after) {
                 return byte;
             }
+            after = Some(ch);
         }
         0
     }

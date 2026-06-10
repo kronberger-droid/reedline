@@ -70,6 +70,22 @@ pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> 
             let head = buf[origin..].find('\n').map_or(buf.len(), |i| origin + i);
             span(head, false)
         }
+        // The adjacent line (`j`/`k`). Lands on the *start* of the line below /
+        // above; on the first/last line it stays put (so `dj`/`dk` there only
+        // affect the current line). Operators snap the span to whole lines.
+        MotionTarget::Line(Direction::Forward) => {
+            let head = buf[origin..].find('\n').map_or(origin, |i| origin + i + 1);
+            span(head, false)
+        }
+        MotionTarget::Line(Direction::Backward) => {
+            let line_start = buf[..origin].rfind('\n').map_or(0, |i| i + 1);
+            let head = if line_start == 0 {
+                origin
+            } else {
+                buf[..line_start - 1].rfind('\n').map_or(0, |i| i + 1)
+            };
+            span(head, false)
+        }
         // Character search (vi `f`/`t`/`F`/`T`). A miss stays at `origin` (a
         // no-op) rather than panicking. Forward find is inclusive (`df` eats the
         // target char); backward is exclusive.
@@ -307,6 +323,29 @@ mod tests {
         assert_eq!(
             resolve_motion("ab\ncd", 4, MotionTarget::BufferEdge(Direction::Backward)).head,
             0
+        );
+    }
+
+    #[test]
+    fn resolve_motion_line_targets_the_adjacent_line() {
+        let buf = "ab\ncd\nef"; // ab@0-1 \n@2 cd@3-4 \n@5 ef@6-7
+                                // from "cd" (origin 4): down → start of "ef", up → start of "ab"
+        assert_eq!(
+            resolve_motion(buf, 4, MotionTarget::Line(Direction::Forward)).head,
+            6
+        );
+        assert_eq!(
+            resolve_motion(buf, 4, MotionTarget::Line(Direction::Backward)).head,
+            0
+        );
+        // no adjacent line → stay put (last line down, first line up)
+        assert_eq!(
+            resolve_motion(buf, 7, MotionTarget::Line(Direction::Forward)).head,
+            7
+        );
+        assert_eq!(
+            resolve_motion(buf, 1, MotionTarget::Line(Direction::Backward)).head,
+            1
         );
     }
 }

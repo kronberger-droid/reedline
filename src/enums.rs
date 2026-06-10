@@ -177,6 +177,10 @@ pub enum MotionTarget {
     LineEdge(Direction),
     /// Whole-buffer edge: `Backward` = start (`gg`), `Forward` = end (`G`).
     BufferEdge(Direction),
+    /// The adjacent logical line: `Forward` = line below (`j`), `Backward` =
+    /// line above (`k`). Used by the linewise operators (`dj`/`dk`); the head
+    /// lands on the adjacent line so a `LineWise` span covers both lines.
+    Line(Direction),
     /// Character search — vi `f`/`F`/`t`/`T`.
     Find {
         /// The character to search for.

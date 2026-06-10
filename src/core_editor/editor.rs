@@ -1545,6 +1545,35 @@ mod test {
     }
 
     #[test]
+    fn cut_line_down_linewise_deletes_current_and_next() {
+        // `dj` from "bbb" deletes bbb + ccc, linewise.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa");
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "\nbbb\nccc");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_line_up_linewise_deletes_current_and_prev() {
+        // `dk` from "bbb" deletes aaa + bbb, linewise.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Line(Direction::Backward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "ccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\nbbb\n");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
     fn cut_from_start_linewise_cuts_through_current_line() {
         let mut editor = linewise_editor();
         editor.run_edit_command(&EditCommand::CutFromStartLinewise {

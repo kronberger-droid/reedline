@@ -364,8 +364,15 @@ impl Command {
                 )]),
                 Motion::Left => Some(vec![ReedlineOption::Edit(EditCommand::Backspace)]),
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::Delete)]),
-                Motion::Up => None,
-                Motion::Down => None,
+                // `dj`/`dk` — current line plus the line below/above, linewise.
+                Motion::Down => Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                    target: MotionTarget::Line(Direction::Forward),
+                    granularity: Granularity::LineWise,
+                })]),
+                Motion::Up => Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                    target: MotionTarget::Line(Direction::Backward),
+                    granularity: Granularity::LineWise,
+                })]),
                 // `dgg`/`dG` — whole lines to the buffer edge, linewise. The
                 // `BufferEdge` target + the LineWise snap (incl. the buffer-end
                 // `\n` fixup) reproduce the dedicated `*Linewise` commands.
@@ -502,8 +509,15 @@ impl Command {
                 )]),
                 Motion::Left => Some(vec![ReedlineOption::Edit(EditCommand::CopyLeft)]),
                 Motion::Right => Some(vec![ReedlineOption::Edit(EditCommand::CopyRight)]),
-                Motion::Up => None,
-                Motion::Down => None,
+                // `yj`/`yk` — current line plus the line below/above, linewise.
+                Motion::Down => Some(vec![ReedlineOption::Edit(EditCommand::Copy {
+                    target: MotionTarget::Line(Direction::Forward),
+                    granularity: Granularity::LineWise,
+                })]),
+                Motion::Up => Some(vec![ReedlineOption::Edit(EditCommand::Copy {
+                    target: MotionTarget::Line(Direction::Backward),
+                    granularity: Granularity::LineWise,
+                })]),
                 // `ygg`/`yG` — whole lines to the buffer edge, linewise.
                 Motion::FirstLine | Motion::LastLine => {
                     let target = motion.target().expect("gg/G resolve to a BufferEdge");

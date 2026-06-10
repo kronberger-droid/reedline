@@ -3,6 +3,7 @@ mod cursor;
 mod edit_stack;
 mod editor;
 mod graphemes;
+mod line;
 mod line_buffer;
 mod resolve;
 mod rest_policy;

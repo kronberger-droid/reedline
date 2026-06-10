@@ -2,6 +2,7 @@ use {
     crate::core_editor::{
         cursor::Cursor,
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
+        line,
     },
     itertools::Itertools,
     std::{convert::From, ops::Range},
@@ -172,10 +173,7 @@ impl LineBuffer {
     ///
     /// Returns 0 for the first line. Pure accessor — does not mutate state.
     pub fn line_start_index(&self) -> usize {
-        self.lines[..self.insertion_point]
-            .rfind('\n')
-            .map_or(0, |offset| offset + 1)
-        // str is guaranteed to be utf8, thus \n is safe to assume 1 byte long
+        line::start_of_line(&self.lines, self.insertion_point)
     }
 
     /// Move the cursor before the first character of the line
@@ -224,17 +222,7 @@ impl LineBuffer {
     /// - end of buffer (`len()`)
     /// - `\n` or `\r\n` (on the first byte)
     pub fn find_current_line_end(&self) -> usize {
-        self.lines[self.insertion_point..].find('\n').map_or_else(
-            || self.lines.len(),
-            |i| {
-                let absolute_index = i + self.insertion_point;
-                if absolute_index > 0 && self.lines.as_bytes()[absolute_index - 1] == b'\r' {
-                    absolute_index - 1
-                } else {
-                    absolute_index
-                }
-            },
-        )
+        line::end_of_line(&self.lines, self.insertion_point)
     }
 
     /// Cursor position *behind* the next unicode grapheme to the right

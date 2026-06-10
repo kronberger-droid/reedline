@@ -1,7 +1,7 @@
 use crate::{
     core_editor::{
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
-        word, Cursor,
+        line, word, Cursor,
     },
     enums::{Direction, MotionTarget, WordEdge},
     FindStop,
@@ -62,27 +62,23 @@ pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> 
         MotionTarget::Offset(n) => span(n.min(buf.len()), false),
         MotionTarget::BufferEdge(Direction::Backward) => span(0, false),
         MotionTarget::BufferEdge(Direction::Forward) => span(buf.len(), false),
-        MotionTarget::LineEdge(Direction::Backward) => {
-            let head = buf[..origin].rfind('\n').map_or(0, |i| i + 1);
-            span(head, false)
-        }
-        MotionTarget::LineEdge(Direction::Forward) => {
-            let head = buf[origin..].find('\n').map_or(buf.len(), |i| origin + i);
-            span(head, false)
-        }
+        MotionTarget::LineEdge(Direction::Backward) => span(line::start_of_line(buf, origin), false),
+        // CRLF-aware via `end_of_line`: `$` stops before the `\r` of a `\r\n`
+        // terminator, matching `LineBuffer::find_current_line_end`.
+        MotionTarget::LineEdge(Direction::Forward) => span(line::end_of_line(buf, origin), false),
         // The adjacent line (`j`/`k`). Lands on the *start* of the line below /
         // above; on the first/last line it stays put (so `dj`/`dk` there only
         // affect the current line). Operators snap the span to whole lines.
         MotionTarget::Line(Direction::Forward) => {
-            let head = buf[origin..].find('\n').map_or(origin, |i| origin + i + 1);
+            let head = line::start_of_next_line(buf, origin).unwrap_or(origin);
             span(head, false)
         }
         MotionTarget::Line(Direction::Backward) => {
-            let line_start = buf[..origin].rfind('\n').map_or(0, |i| i + 1);
+            let line_start = line::start_of_line(buf, origin);
             let head = if line_start == 0 {
                 origin
             } else {
-                buf[..line_start - 1].rfind('\n').map_or(0, |i| i + 1)
+                line::start_of_line(buf, line_start - 1)
             };
             span(head, false)
         }
@@ -243,6 +239,21 @@ mod tests {
     }
 
     #[test]
+    fn resolve_motion_find_before_replay_from_landing_spot_is_stuck() {
+        // `t` lands one grapheme short of the target; replaying the same Find
+        // (`;`) from that landing spot searches from the next grapheme — the
+        // target char itself — re-finds the *same* occurrence, and lands back
+        // where it began. Vim (default cpoptions) skips to the next occurrence
+        // instead; reedline keeps the historical stuck behavior, pinned here so
+        // any future change to it is deliberate.
+        let t = find('x', Direction::Forward, FindStop::Before);
+        // "axbxc": x@1, x@3. From 0 (adjacent to x@1): stays at 0.
+        assert_eq!(resolve_motion("axbxc", 0, t).head, 0);
+        // From 2 (adjacent to x@3): stays at 2.
+        assert_eq!(resolve_motion("axbxc", 2, t).head, 2);
+    }
+
+    #[test]
     fn resolve_motion_find_absent_char_stays_put() {
         // Totality: an unfindable char is a no-op, never a panic.
         assert_eq!(
@@ -301,6 +312,16 @@ mod tests {
         assert_eq!(
             resolve_motion("ab\ncd", 0, MotionTarget::LineEdge(Direction::Forward)),
             Movement { head: 2, op_end: 2 } // line edge is exclusive
+        );
+    }
+
+    #[test]
+    fn resolve_motion_line_edge_forward_stops_before_crlf() {
+        // On a CRLF-terminated line `$` lands before the `\r`, matching
+        // `LineBuffer::find_current_line_end` — both delegate to `end_of_line`.
+        assert_eq!(
+            resolve_motion("ab\r\ncd", 0, MotionTarget::LineEdge(Direction::Forward)).head,
+            2
         );
     }
 

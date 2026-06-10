@@ -94,17 +94,23 @@ impl Editor {
                 let head = self.resolve_head(*t);
                 self.move_head_to(head, true);
             }
-            EditCommand::Cut(t) => {
-                let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
-                self.operate(sel, OperatorVerb::Cut);
+            EditCommand::Cut {
+                target,
+                granularity,
+            } => {
+                let sel = operator_span(self.get_buffer(), self.insertion_point(), *target);
+                self.operate(sel, OperatorVerb::Cut, *granularity);
             }
-            EditCommand::Copy(t) => {
-                let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
-                self.operate(sel, OperatorVerb::Copy);
+            EditCommand::Copy {
+                target,
+                granularity,
+            } => {
+                let sel = operator_span(self.get_buffer(), self.insertion_point(), *target);
+                self.operate(sel, OperatorVerb::Copy, *granularity);
             }
             EditCommand::Erase(t) => {
                 let sel = operator_span(self.get_buffer(), self.insertion_point(), *t);
-                self.operate(sel, OperatorVerb::Erase);
+                self.operate(sel, OperatorVerb::Erase, Granularity::CharWise);
             }
             EditCommand::InsertChar(c) => self.insert_char(*c),
             EditCommand::Complete => {}
@@ -261,11 +267,25 @@ impl Editor {
         self.selection_inclusive = None;
     }
 
-    fn operate(&mut self, selection: Cursor, verb: OperatorVerb) {
-        let range = selection.start()..selection.end();
+    fn operate(&mut self, selection: Cursor, verb: OperatorVerb, granularity: Granularity) {
+        let range = match granularity {
+            Granularity::CharWise => selection.start()..selection.end(),
+            Granularity::LineWise => {
+                let buf = self.get_buffer();
+                let mut s = buf[..selection.start()].rfind('\n').map_or(0, |i| i + 1);
+                let e = buf[selection.end()..]
+                    .find('\n')
+                    .map_or(buf.len(), |i| selection.end() + i + 1);
+                if e == buf.len() && s > 0 {
+                    s -= 1;
+                }
+                s..e
+            }
+        };
+
         match verb {
-            OperatorVerb::Cut => self.cut_range(range),
-            OperatorVerb::Copy => self.copy_range(range),
+            OperatorVerb::Cut => self.cut_range_with(range, granularity),
+            OperatorVerb::Copy => self.copy_range_with(range, granularity),
             OperatorVerb::Erase => {
                 self.line_buffer.clear_range_safe(range.clone());
                 self.line_buffer.set_insertion_point(range.start);
@@ -893,17 +913,25 @@ impl Editor {
     }
 
     fn cut_range(&mut self, range: Range<usize>) {
+        self.cut_range_with(range, Granularity::CharWise);
+    }
+
+    fn cut_range_with(&mut self, range: Range<usize>, granularity: Granularity) {
         if range.start <= range.end {
-            self.copy_range(range.clone());
+            self.copy_range_with(range.clone(), granularity);
             self.line_buffer.clear_range_safe(range.clone());
             self.line_buffer.set_insertion_point(range.start);
         }
     }
 
     fn copy_range(&mut self, range: Range<usize>) {
+        self.copy_range_with(range, Granularity::CharWise);
+    }
+
+    fn copy_range_with(&mut self, range: Range<usize>, granularity: Granularity) {
         if range.start < range.end {
             let slice = &self.line_buffer.get_buffer()[range];
-            self.cut_buffer.set(slice, Granularity::CharWise);
+            self.cut_buffer.set(slice, granularity);
         }
     }
 
@@ -1435,6 +1463,85 @@ mod test {
         let (content, mode) = editor.cut_buffer.get();
         assert_eq!(content, "bbb\n");
         assert!(matches!(mode, Granularity::LineWise));
+    }
+
+    // --- explicit-granularity target (Phase 2 step 3 makes these pass) ----
+    //
+    // The new vocab: `dd` = `Cut(LineEdge, LineWise)`, `dgg` = `Cut(BufferEdge(Bwd),
+    // LineWise)`, `dG` = `Cut(BufferEdge(Fwd), LineWise)`. `operate` must snap a
+    // LineWise span out to whole lines (incl. the `dG` leading-\n fixup) and tag
+    // the register `LineWise`. These mirror the dedicated-command golden masters
+    // above. (`operate` ignores granularity until step 3, so they start red.)
+
+    #[test]
+    fn cut_lineedge_linewise_matches_current_line() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::LineEdge(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\nccc");
+        assert_eq!(editor.insertion_point(), 4);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb\n");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_bufferedge_back_linewise_cuts_through_current_line() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::BufferEdge(Direction::Backward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "ccc");
+        assert_eq!(editor.insertion_point(), 0);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "aaa\nbbb\n");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_bufferedge_fwd_linewise_eats_leading_newline() {
+        // the `dG` fixup: reaching buffer end consumes the *preceding* \n so no
+        // stray blank line is left.
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::BufferEdge(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa");
+        assert_eq!(editor.insertion_point(), 3);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "\nbbb\nccc");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn copy_lineedge_linewise_tags_register_nondestructively() {
+        let mut editor = linewise_editor();
+        editor.run_edit_command(&EditCommand::Copy {
+            target: MotionTarget::LineEdge(Direction::Forward),
+            granularity: Granularity::LineWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\nbbb\nccc"); // unchanged
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bbb\n");
+        assert_eq!(gran, Granularity::LineWise);
+    }
+
+    #[test]
+    fn cut_lineedge_charwise_stays_charwise() {
+        // CharWise must NOT snap: `d$` from mid-line cuts to the line end only.
+        let mut editor = linewise_editor(); // cursor 5, inside "bbb"
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::LineEdge(Direction::Forward),
+            granularity: Granularity::CharWise,
+        });
+        assert_eq!(editor.get_buffer(), "aaa\nb\nccc"); // removed "bb"
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "bb");
+        assert_eq!(gran, Granularity::CharWise);
     }
 
     #[test]
@@ -2545,7 +2652,10 @@ mod test {
     fn cut_word_forward_removes_range_and_yanks() {
         let mut editor = editor_with("foo bar baz");
         editor.move_to_position(0, false);
-        editor.run_edit_command(&EditCommand::Cut(word_start_fwd()));
+        editor.run_edit_command(&EditCommand::Cut {
+            target: word_start_fwd(),
+            granularity: Granularity::CharWise,
+        });
         assert_eq!(editor.get_buffer(), "bar baz");
         assert_eq!(editor.insertion_point(), 0);
         assert_eq!(editor.cut_buffer.get().0, "foo ");
@@ -2555,11 +2665,14 @@ mod test {
     fn cut_word_backward_removes_preceding_word() {
         let mut editor = editor_with("foo bar");
         editor.move_to_position(7, false); // end of buffer
-        editor.run_edit_command(&EditCommand::Cut(MotionTarget::Word {
-            kind: WordKind::Small,
-            edge: WordEdge::Start,
-            direction: Direction::Backward,
-        }));
+        editor.run_edit_command(&EditCommand::Cut {
+            target: MotionTarget::Word {
+                kind: WordKind::Small,
+                edge: WordEdge::Start,
+                direction: Direction::Backward,
+            },
+            granularity: Granularity::CharWise,
+        });
         assert_eq!(editor.get_buffer(), "foo ");
         assert_eq!(editor.insertion_point(), 4); // cursor lands at the range start
         assert_eq!(editor.cut_buffer.get().0, "bar");
@@ -2569,7 +2682,10 @@ mod test {
     fn copy_word_forward_yanks_without_editing() {
         let mut editor = editor_with("foo bar");
         editor.move_to_position(0, false);
-        editor.run_edit_command(&EditCommand::Copy(word_start_fwd()));
+        editor.run_edit_command(&EditCommand::Copy {
+            target: word_start_fwd(),
+            granularity: Granularity::CharWise,
+        });
         assert_eq!(editor.get_buffer(), "foo bar"); // buffer untouched
         assert_eq!(editor.insertion_point(), 0); // cursor untouched
         assert_eq!(editor.cut_buffer.get().0, "foo ");
@@ -2638,7 +2754,10 @@ mod test {
         // motion lands on — so `de` from the start of "foo" deletes all of "foo".
         let mut editor = editor_with("foo bar");
         editor.move_to_position(0, false);
-        editor.run_edit_command(&EditCommand::Cut(word_end_fwd()));
+        editor.run_edit_command(&EditCommand::Cut {
+            target: word_end_fwd(),
+            granularity: Granularity::CharWise,
+        });
         assert_eq!(editor.get_buffer(), " bar");
         assert_eq!(editor.cut_buffer.get().0, "foo");
     }
@@ -2690,13 +2809,19 @@ mod test {
         equivalent(
             "foo bar",
             2,
-            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::Cut {
+                target: MotionTarget::LineEdge(Direction::Forward),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutToLineEnd,
         );
         equivalent(
             "foo bar",
             4,
-            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Backward)),
+            &EditCommand::Cut {
+                target: MotionTarget::LineEdge(Direction::Backward),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutFromLineStart,
         );
     }
@@ -2706,13 +2831,19 @@ mod test {
         equivalent(
             "foo bar",
             2,
-            &EditCommand::Copy(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::Copy {
+                target: MotionTarget::LineEdge(Direction::Forward),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CopyToLineEnd,
         );
         equivalent(
             "foo bar",
             4,
-            &EditCommand::Copy(MotionTarget::LineEdge(Direction::Backward)),
+            &EditCommand::Copy {
+                target: MotionTarget::LineEdge(Direction::Backward),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CopyFromLineStart,
         );
     }
@@ -2724,13 +2855,19 @@ mod test {
         equivalent(
             "ab\ncd",
             0,
-            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::Cut {
+                target: MotionTarget::LineEdge(Direction::Forward),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutToLineEnd,
         );
         let (buffer, cursor, _selection, cut) = outcome(
             "ab\ncd",
             0,
-            &EditCommand::Cut(MotionTarget::LineEdge(Direction::Forward)),
+            &EditCommand::Cut {
+                target: MotionTarget::LineEdge(Direction::Forward),
+                granularity: Granularity::CharWise,
+            },
         );
         assert_eq!(buffer, "\ncd");
         assert_eq!(cursor, 0);
@@ -2800,7 +2937,10 @@ mod test {
         equivalent(
             "foo bar baz",
             0,
-            &EditCommand::Cut(find('b', Direction::Forward, FindStop::On)),
+            &EditCommand::Cut {
+                target: find('b', Direction::Forward, FindStop::On),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutRightUntil('b'),
         );
     }
@@ -2811,7 +2951,10 @@ mod test {
         equivalent(
             "foo bar baz",
             0,
-            &EditCommand::Cut(find('b', Direction::Forward, FindStop::Before)),
+            &EditCommand::Cut {
+                target: find('b', Direction::Forward, FindStop::Before),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutRightBefore('b'),
         );
     }
@@ -2822,7 +2965,10 @@ mod test {
         equivalent(
             "foo bar baz",
             11,
-            &EditCommand::Cut(find('o', Direction::Backward, FindStop::On)),
+            &EditCommand::Cut {
+                target: find('o', Direction::Backward, FindStop::On),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutLeftUntil('o'),
         );
     }
@@ -2833,7 +2979,10 @@ mod test {
         equivalent(
             "foo bar baz",
             11,
-            &EditCommand::Cut(find('o', Direction::Backward, FindStop::Before)),
+            &EditCommand::Cut {
+                target: find('o', Direction::Backward, FindStop::Before),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutLeftBefore('o'),
         );
     }
@@ -2843,7 +2992,10 @@ mod test {
         equivalent(
             "foo bar",
             0,
-            &EditCommand::Cut(find('z', Direction::Forward, FindStop::On)),
+            &EditCommand::Cut {
+                target: find('z', Direction::Forward, FindStop::On),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CutRightUntil('z'),
         );
     }
@@ -2853,7 +3005,10 @@ mod test {
         equivalent(
             "foo bar baz",
             0,
-            &EditCommand::Copy(find('b', Direction::Forward, FindStop::On)),
+            &EditCommand::Copy {
+                target: find('b', Direction::Forward, FindStop::On),
+                granularity: Granularity::CharWise,
+            },
             &EditCommand::CopyRightUntil('b'),
         );
     }

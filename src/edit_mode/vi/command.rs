@@ -1,6 +1,6 @@
 use super::{motion::Motion, parser::ReedlineOption, ViMode};
 use crate::enums::{TextObject, TextObjectScope, TextObjectType};
-use crate::{EditCommand, ReedlineEvent, Vi};
+use crate::{EditCommand, Granularity, ReedlineEvent, Vi};
 use std::iter::Peekable;
 
 pub fn parse_command<'iter, I>(mode: ViMode, input: &mut Peekable<I>) -> Option<Command>
@@ -339,7 +339,10 @@ impl Command {
                 | Motion::Start
                 | Motion::End => {
                     let target = motion.target().expect("motion resolves to a target");
-                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                        target,
+                        granularity: Granularity::CharWise,
+                    })])
                 }
                 Motion::RightUntil(_)
                 | Motion::RightBefore(_)
@@ -347,7 +350,10 @@ impl Command {
                 | Motion::LeftBefore(_) => {
                     let target = motion.target().expect("char search resolves to a target");
                     vi_state.last_char_search = Some(target);
-                    Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                        target,
+                        granularity: Granularity::CharWise,
+                    })])
                 }
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CutFromLineNonBlankStart,
@@ -369,12 +375,18 @@ impl Command {
                         leave_blank_line: false,
                     })])
                 }
-                Motion::ReplayCharSearch => vi_state
-                    .last_char_search
-                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Cut(target))]),
-                Motion::ReverseCharSearch => vi_state
-                    .last_char_search
-                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Cut(target.reversed()))]),
+                Motion::ReplayCharSearch => vi_state.last_char_search.map(|target| {
+                    vec![ReedlineOption::Edit(EditCommand::Cut {
+                        target,
+                        granularity: Granularity::CharWise,
+                    })]
+                }),
+                Motion::ReverseCharSearch => vi_state.last_char_search.map(|target| {
+                    vec![ReedlineOption::Edit(EditCommand::Cut {
+                        target: target.reversed(),
+                        granularity: Granularity::CharWise,
+                    })]
+                }),
             },
             Self::Change => {
                 let op = match motion {
@@ -399,7 +411,10 @@ impl Command {
                             other => other.target(),
                         }
                         .expect("motion resolves to a target");
-                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                            target,
+                            granularity: Granularity::CharWise,
+                        })])
                     }
                     Motion::RightUntil(_)
                     | Motion::RightBefore(_)
@@ -407,7 +422,10 @@ impl Command {
                     | Motion::LeftBefore(_) => {
                         let target = motion.target().expect("char search resolves to a target");
                         vi_state.last_char_search = Some(target);
-                        Some(vec![ReedlineOption::Edit(EditCommand::Cut(target))])
+                        Some(vec![ReedlineOption::Edit(EditCommand::Cut {
+                            target,
+                            granularity: Granularity::CharWise,
+                        })])
                     }
                     Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                         EditCommand::CutFromLineNonBlankStart,
@@ -428,11 +446,17 @@ impl Command {
                             leave_blank_line: true,
                         })])
                     }
-                    Motion::ReplayCharSearch => vi_state
-                        .last_char_search
-                        .map(|target| vec![ReedlineOption::Edit(EditCommand::Cut(target))]),
+                    Motion::ReplayCharSearch => vi_state.last_char_search.map(|target| {
+                        vec![ReedlineOption::Edit(EditCommand::Cut {
+                            target,
+                            granularity: Granularity::CharWise,
+                        })]
+                    }),
                     Motion::ReverseCharSearch => vi_state.last_char_search.map(|target| {
-                        vec![ReedlineOption::Edit(EditCommand::Cut(target.reversed()))]
+                        vec![ReedlineOption::Edit(EditCommand::Cut {
+                            target: target.reversed(),
+                            granularity: Granularity::CharWise,
+                        })]
                     }),
                 };
                 // Semihack: Append `Repaint` to ensure the mode change gets displayed
@@ -452,7 +476,10 @@ impl Command {
                 | Motion::Start
                 | Motion::End => {
                     let target = motion.target().expect("motion resolves to a target");
-                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(target))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy {
+                        target,
+                        granularity: Granularity::CharWise,
+                    })])
                 }
                 Motion::RightUntil(_)
                 | Motion::RightBefore(_)
@@ -460,7 +487,10 @@ impl Command {
                 | Motion::LeftBefore(_) => {
                     let target = motion.target().expect("char search resolves to a target");
                     vi_state.last_char_search = Some(target);
-                    Some(vec![ReedlineOption::Edit(EditCommand::Copy(target))])
+                    Some(vec![ReedlineOption::Edit(EditCommand::Copy {
+                        target,
+                        granularity: Granularity::CharWise,
+                    })])
                 }
                 Motion::NonBlankStart => Some(vec![ReedlineOption::Edit(
                     EditCommand::CopyFromLineNonBlankStart,
@@ -477,12 +507,18 @@ impl Command {
                 Motion::LastLine => {
                     Some(vec![ReedlineOption::Edit(EditCommand::CopyToEndLinewise)])
                 }
-                Motion::ReplayCharSearch => vi_state
-                    .last_char_search
-                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Copy(target))]),
-                Motion::ReverseCharSearch => vi_state
-                    .last_char_search
-                    .map(|target| vec![ReedlineOption::Edit(EditCommand::Copy(target.reversed()))]),
+                Motion::ReplayCharSearch => vi_state.last_char_search.map(|target| {
+                    vec![ReedlineOption::Edit(EditCommand::Copy {
+                        target,
+                        granularity: Granularity::CharWise,
+                    })]
+                }),
+                Motion::ReverseCharSearch => vi_state.last_char_search.map(|target| {
+                    vec![ReedlineOption::Edit(EditCommand::Copy {
+                        target: target.reversed(),
+                        granularity: Granularity::CharWise,
+                    })]
+                }),
             },
             _ => None,
         }

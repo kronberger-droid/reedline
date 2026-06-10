@@ -338,11 +338,23 @@ pub enum EditCommand {
     Extend(MotionTarget),
 
     /// Cut the text between the cursor and a [`MotionTarget`] into the cut buffer.
-    Cut(MotionTarget),
+    /// `granularity` decides whether the span is taken char-wise or snapped to
+    /// whole lines (and tags the register accordingly).
+    Cut {
+        /// Where the operator reaches to.
+        target: MotionTarget,
+        /// Char-wise span or whole lines.
+        granularity: Granularity,
+    },
 
     /// Copy the text between the cursor and a [`MotionTarget`] into the cut
     /// buffer, leaving the buffer and cursor unchanged.
-    Copy(MotionTarget),
+    Copy {
+        /// Where the operator reaches to.
+        target: MotionTarget,
+        /// Char-wise span or whole lines.
+        granularity: Granularity,
+    },
 
     /// Erase the text between the cursor and a [`MotionTarget`] without touching
     /// the cut buffer (no-register counterpart of [`EditCommand::Cut`]).
@@ -773,8 +785,8 @@ impl EditCommand {
             // the buffer; `Copy` does not.
             EditCommand::Move(_) => EditType::MoveCursor { select: false },
             EditCommand::Extend(_) => EditType::MoveCursor { select: true },
-            EditCommand::Cut(_) => EditType::EditText,
-            EditCommand::Copy(_) => EditType::NoOp,
+            EditCommand::Cut { .. } => EditType::EditText,
+            EditCommand::Copy { .. } => EditType::NoOp,
             EditCommand::Erase(_) => EditType::EditText,
         }
     }

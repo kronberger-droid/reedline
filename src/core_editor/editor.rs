@@ -11,6 +11,7 @@ use crate::{core_editor::get_local_clipboard, EditCommand};
 use crate::{Direction, Granularity, MotionTarget};
 use std::cmp::{max, min};
 use std::ops::{DerefMut, Range};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Stateful editor executing changes to the underlying [`LineBuffer`]
 ///
@@ -180,7 +181,15 @@ impl Editor {
             EditCommand::PasteCutBufferAfter => self.insert_cut_buffer_after(),
             EditCommand::UppercaseWord => self.line_buffer.uppercase_word(),
             EditCommand::LowercaseWord => self.line_buffer.lowercase_word(),
-            EditCommand::SwitchcaseChar => self.line_buffer.switchcase_char(),
+            EditCommand::SwitchcaseChar => {
+                // Settle the head onto the caret grapheme first: under Block an
+                // anchored forward range keeps LineBuffer's head one gap past
+                // the caret, and this legacy at-the-head op would miss the
+                // cell. (Switching the whole selection, like Helix, is TODO.)
+                let caret = self.insertion_point();
+                self.line_buffer.set_insertion_point(caret);
+                self.line_buffer.switchcase_char()
+            }
             EditCommand::CapitalizeChar => self.line_buffer.capitalize_char(),
             EditCommand::SwapWords => self.line_buffer.swap_words(),
             EditCommand::SwapGraphemes => self.line_buffer.swap_graphemes(),
@@ -449,7 +458,17 @@ impl Editor {
         let was_empty = self.line_buffer.selection_anchor().is_none();
         let cursor = self.line_buffer.cursor();
         let next = if select {
-            cursor.move_head(head)
+            if self.edit_mode.rest_policy() == RestPolicy::Block {
+                // Helix extend: land the caret on the target grapheme, flipping
+                // the anchor onto the far edge of its grapheme when the
+                // selection crosses it (`Range::put_cursor`). A raw `move_head`
+                // would pass through an *empty* range at the crossing, which
+                // `set_cursor` reads as "no selection" — silently dropping the
+                // anchor and stranding the extend one cell past it.
+                cursor.put_cursor(self.line_buffer.get_buffer(), head, true)
+            } else {
+                cursor.move_head(head)
+            }
         } else {
             cursor.collapse_to(head)
         };
@@ -892,11 +911,30 @@ impl Editor {
     }
 
     fn replace_char(&mut self, character: char) {
-        let insertion_point = self.line_buffer.insertion_point();
-        self.line_buffer.delete_right_grapheme();
+        if let Some((start, end)) = self.get_selection() {
+            // Replace every grapheme in the selection, preserving line
+            // endings — vi visual / Helix `r` semantics. Routing through the
+            // selection also dodges the Block convention trap: an anchored
+            // forward range keeps LineBuffer's head one gap *past* the caret
+            // grapheme, so the old at-the-head replace hit the wrong cell.
+            let replaced: String = self.line_buffer.get_buffer()[start..end]
+                .graphemes(true)
+                .map(|grapheme| match grapheme {
+                    "\n" | "\r\n" => grapheme.to_string(),
+                    _ => character.to_string(),
+                })
+                .collect();
+            self.line_buffer.clear_range_safe(start..end);
+            self.line_buffer.set_insertion_point(start);
+            self.line_buffer.insert_str(&replaced);
+            self.line_buffer.set_insertion_point(start);
+        } else {
+            let insertion_point = self.line_buffer.insertion_point();
+            self.line_buffer.delete_right_grapheme();
 
-        self.line_buffer.insert_char(character);
-        self.line_buffer.set_insertion_point(insertion_point);
+            self.line_buffer.insert_char(character);
+            self.line_buffer.set_insertion_point(insertion_point);
+        }
     }
 
     fn replace_chars(&mut self, n_chars: usize, string: &str) {
@@ -2148,6 +2186,60 @@ mod test {
         editor.run_edit_command(&EditCommand::CollapseSelection(Direction::Backward));
         assert_eq!(editor.get_selection(), None);
         assert_eq!(editor.line_buffer().cursor(), Cursor::point(0));
+    }
+
+    #[test]
+    fn block_extend_crosses_the_anchor_without_stranding() {
+        // Walking the head back and forth across the anchor must flip the
+        // anchor onto the far edge of its grapheme (Range::put_cursor), never
+        // pass through an empty range that silently drops the selection.
+        let mut editor = helix_editor("abcde");
+        editor.line_buffer.set_insertion_point(2); // caret on 'c'
+        let back = EditCommand::Extend(MotionTarget::Grapheme(Direction::Backward));
+        let fwd = EditCommand::Extend(MotionTarget::Grapheme(Direction::Forward));
+
+        editor.run_edit_command(&back); // covers "bc", caret 'b'
+        editor.run_edit_command(&back); // covers "abc", caret 'a'
+        assert_eq!(editor.get_selection(), Some((0, 3)));
+
+        editor.run_edit_command(&fwd); // covers "bc"
+        editor.run_edit_command(&fwd); // covers "c"
+        assert_eq!(editor.get_selection(), Some((2, 3)));
+        editor.run_edit_command(&fwd); // crosses: covers "cd", caret 'd'
+        assert_eq!(editor.get_selection(), Some((2, 4)));
+        assert_eq!(editor.insertion_point(), 3);
+
+        // and back across again, without getting stuck
+        editor.run_edit_command(&back);
+        editor.run_edit_command(&back);
+        assert_eq!(editor.get_selection(), Some((1, 3)));
+        assert_eq!(editor.insertion_point(), 1);
+    }
+
+    #[test]
+    fn block_replace_char_replaces_the_selection() {
+        // `r` with an active selection replaces every selected grapheme —
+        // and must not hit the cell one past the gap-indexed head.
+        let mut editor = helix_editor("foo bar");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word())); // "foo "
+        editor.run_edit_command(&EditCommand::ReplaceChar('x'));
+        assert_eq!(editor.get_buffer(), "xxxxbar");
+    }
+
+    #[test]
+    fn block_switchcase_hits_the_caret_grapheme() {
+        // `~` under a forward selection: the legacy at-the-head op must be
+        // settled onto the caret, not the gap one past it.
+        let mut editor = helix_editor("abc");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(MotionTarget::Find {
+            ch: 'b',
+            direction: Direction::Forward,
+            stop: FindStop::On,
+        })); // covers "ab", caret on 'b'
+        editor.run_edit_command(&EditCommand::SwitchcaseChar);
+        assert_eq!(editor.get_buffer(), "aBc");
     }
 
     #[test]

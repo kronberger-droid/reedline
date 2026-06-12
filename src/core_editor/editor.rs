@@ -1,7 +1,9 @@
 use super::{edit_stack::EditStack, Clipboard, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
-use crate::core_editor::{commit, line, operator_span, resolve_motion, RestPolicy};
+use crate::core_editor::{
+    commit, line, operator_span, resolve_motion, resolve_selection, RestPolicy,
+};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -98,6 +100,7 @@ impl Editor {
                 let head = self.resolve_head(*t);
                 self.move_head_to(head, true);
             }
+            EditCommand::Select(t) => self.select_to_target(*t),
             EditCommand::Cut {
                 target,
                 granularity,
@@ -134,6 +137,7 @@ impl Editor {
             EditCommand::Backspace => self.backspace(),
             EditCommand::Delete => self.delete(),
             EditCommand::CutChar => self.cut_char(),
+            EditCommand::CopyChar => self.copy_char(),
             EditCommand::BackspaceWord => self.line_buffer.delete_word_left(),
             EditCommand::DeleteWord => self.line_buffer.delete_word_right(),
             EditCommand::Clear => self.line_buffer.clear(),
@@ -421,6 +425,23 @@ impl Editor {
         }
     }
 
+    /// Replace the selection with the span `target` travels over (Helix-style
+    /// selection-first motion): anchor on the near edge, head resting on the
+    /// span's last grapheme. The selection sink for [`EditCommand::Select`],
+    /// beside [`Editor::move_head_to`] which serves `Move`/`Extend`.
+    fn select_to_target(&mut self, target: MotionTarget) {
+        let selection = resolve_selection(self.get_buffer(), self.insertion_point(), target);
+        self.line_buffer.set_cursor(selection);
+        self.commit_cursor();
+        // Capture inclusivity exactly like an anchor planted on the motion
+        // path, so a later mode switch can't change the selected span.
+        self.selection_inclusive = if selection.is_empty() {
+            None
+        } else {
+            Some(self.edit_mode.rest_policy() == RestPolicy::OnGrapheme)
+        };
+    }
+
     pub(crate) fn move_line_up(&mut self, select: bool) {
         self.update_selection_anchor(select);
         self.line_buffer.move_line_up();
@@ -682,6 +703,24 @@ impl Editor {
             let insertion_offset = self.line_buffer.insertion_point();
             let next_char = self.line_buffer.grapheme_right_index();
             self.cut_range(insertion_offset..next_char);
+        }
+    }
+
+    /// Yank counterpart of [`Editor::cut_char`]: the selection if one is
+    /// active, otherwise the grapheme under the cursor — Helix's "the cursor
+    /// is a one-grapheme selection" model for `y`.
+    fn copy_char(&mut self) {
+        if self.line_buffer.selection_anchor().is_some() {
+            self.copy_selection_to_cut_buffer();
+        } else {
+            let insertion_offset = self.line_buffer.insertion_point();
+            let right_index = self.line_buffer.grapheme_right_index();
+            if right_index > insertion_offset {
+                self.cut_buffer.set(
+                    &self.line_buffer.get_buffer()[insertion_offset..right_index],
+                    Granularity::CharWise,
+                );
+            }
         }
     }
 
@@ -1831,6 +1870,92 @@ mod test {
         let (content, gran) = editor.cut_buffer.get();
         assert_eq!(content, "bb");
         assert_eq!(gran, Granularity::CharWise);
+    }
+
+    // --- the Select verb (Helix selection-first motions) ---
+    //
+    // `Select` re-anchors on every motion, and the Helix machine reports
+    // Vi-normal (an `OnGrapheme` policy), so the planted selection is
+    // inclusive: the grapheme under the head belongs to the span.
+
+    fn helix_word() -> MotionTarget {
+        MotionTarget::Word {
+            kind: WordKind::Small,
+            edge: WordEdge::Start,
+            direction: Direction::Forward,
+        }
+    }
+
+    #[test]
+    fn select_word_plants_inclusive_selection() {
+        let mut editor = vi_editor("foo bar baz", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        // span "foo " — cursor resting on the space, selection covering it
+        assert_eq!(editor.get_selection(), Some((0, 4)));
+        assert_eq!(editor.insertion_point(), 3);
+    }
+
+    #[test]
+    fn repeated_select_word_walks_word_by_word() {
+        // The second `w` starts on the space the first one parked on; the
+        // boundary hop must carry the selection onto "bar ", not strand it.
+        let mut editor = vi_editor("foo bar baz", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        assert_eq!(editor.get_selection(), Some((4, 8)));
+        assert_eq!(editor.insertion_point(), 7);
+    }
+
+    #[test]
+    fn select_then_cut_char_consumes_the_span() {
+        // The Helix `wd` chain: select a word, then `d` (CutChar) eats the
+        // selection into the cut buffer.
+        let mut editor = vi_editor("foo bar baz", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        editor.run_edit_command(&EditCommand::CutChar);
+        assert_eq!(editor.get_buffer(), "bar baz");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "foo ");
+    }
+
+    #[test]
+    fn select_line_edges_covers_the_line() {
+        // The Helix `x` lowering: Move to line start, Select to line end.
+        let mut editor = vi_editor("aaa\nbbb\nccc", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(5);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::LineEdge(
+            Direction::Backward,
+        )));
+        editor.run_edit_command(&EditCommand::Select(MotionTarget::LineEdge(
+            Direction::Forward,
+        )));
+        assert_eq!(editor.get_selection(), Some((4, 7)));
+    }
+
+    #[test]
+    fn copy_char_without_selection_copies_cursor_grapheme() {
+        let mut editor = vi_editor("foo", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(1);
+        editor.run_edit_command(&EditCommand::CopyChar);
+        let (content, gran) = editor.cut_buffer.get();
+        assert_eq!(content, "o");
+        assert_eq!(gran, Granularity::CharWise);
+        assert_eq!(editor.get_buffer(), "foo"); // buffer untouched
+    }
+
+    #[test]
+    fn copy_char_with_selection_copies_the_selection() {
+        // The Helix `wy` chain.
+        let mut editor = vi_editor("foo bar", PromptViMode::Normal);
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        editor.run_edit_command(&EditCommand::CopyChar);
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "foo ");
+        assert_eq!(editor.get_buffer(), "foo bar");
     }
 
     #[test]

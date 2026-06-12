@@ -345,6 +345,15 @@ pub enum EditCommand {
     /// target while keeping the anchor fixed.
     Extend(MotionTarget),
 
+    /// Select the span a [`MotionTarget`] travels over, replacing any previous
+    /// selection — the Helix-style selection-first motion. The anchor is
+    /// planted at the near edge of the span and the head rests on its last
+    /// grapheme, so the cursor sits *inside* the selection (Helix `w`/`b`/`e`/
+    /// `f`). Contrast [`EditCommand::Move`] (collapse) and
+    /// [`EditCommand::Extend`] (keep the anchor): `Select` is the third anchor
+    /// policy — re-anchor, then move.
+    Select(MotionTarget),
+
     /// Cut the text between the cursor and a [`MotionTarget`] into the cut buffer.
     /// `granularity` decides whether the span is taken char-wise or snapped to
     /// whole lines (and tags the register accordingly).
@@ -418,6 +427,11 @@ pub enum EditCommand {
 
     /// Cut the grapheme right from the current insertion point
     CutChar,
+
+    /// Copy the selection if one is active, otherwise the grapheme right of the
+    /// current insertion point — the yank counterpart of [`EditCommand::CutChar`],
+    /// matching Helix's "the cursor is a one-grapheme selection" model (`y`).
+    CopyChar,
 
     /// Backspace delete a word from the current insertion point
     BackspaceWord,
@@ -815,14 +829,16 @@ impl EditCommand {
             | EditCommand::CopyLeftBefore(_)
             | EditCommand::CopyInsidePair { .. }
             | EditCommand::CopyAroundPair { .. }
+            | EditCommand::CopyChar
             | EditCommand::CopyTextObject { .. } => EditType::NoOp,
 
-            // The six MotionTarget verbs. `Move`/`Extend` carry the old `select`
-            // bool in the verb itself (Extend must be `select: true` so the editor
-            // does not clear the selection it is extending). `Cut`/`Change`/`Erase`
-            // mutate the buffer; `Copy` does not.
+            // The seven MotionTarget verbs. `Move`/`Extend`/`Select` carry the old
+            // `select` bool in the verb itself (`Extend` and `Select` must be
+            // `select: true` so the editor does not clear the selection they
+            // produce). `Cut`/`Change`/`Erase` mutate the buffer; `Copy` does not.
             EditCommand::Move(_) => EditType::MoveCursor { select: false },
             EditCommand::Extend(_) => EditType::MoveCursor { select: true },
+            EditCommand::Select(_) => EditType::MoveCursor { select: true },
             EditCommand::Cut { .. } => EditType::EditText,
             EditCommand::Copy { .. } => EditType::NoOp,
             EditCommand::Change { .. } => EditType::EditText,
@@ -1088,17 +1104,5 @@ impl TryFrom<Event> for ReedlineRawEvent {
 impl From<ReedlineRawEvent> for Event {
     fn from(event: ReedlineRawEvent) -> Self {
         event.0
-    }
-}
-
-#[cfg(feature = "helix")]
-impl TryFrom<ReedlineRawEvent> for KeyEvent {
-    type Error = ReedlineRawEvent;
-
-    fn try_from(event: ReedlineRawEvent) -> Result<Self, Self::Error> {
-        match event.0 {
-            Event::Key(key_event) => Ok(key_event),
-            other => Err(ReedlineRawEvent(other)),
-        }
     }
 }

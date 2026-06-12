@@ -1,20 +1,31 @@
 // Create a reedline object with the experimental Helix edit mode.
-// cargo run --example helix --features helix
 //
-// The current Helix example maps Ctrl-D to exit and uses the default prompt,
-// which renders the active custom mode indicator as "(helix)".
+//     cargo run --example helix --features helix
+//
+// Helix is selection-first: motions select the text they travel over, and
+// operators act on that selection. Watch the highlighted span follow `w`/`b`/
+// `e`/`f` before you press `d`, `c` or `y`.
 
 use reedline::{DefaultPrompt, Helix, Reedline, Signal};
 use std::io;
 
 fn main() -> io::Result<()> {
     println!(
-        "Helix edit mode demo:
-Default mode is insert (`:` prompt), so you can type words.
-Press Esc for normal mode.
-Press `i` to return to insert mode, or `a` to insert after the current selection.
-Only `h`/`l` motions are currently implemented.
-Abort with Ctrl-C"
+        "Helix edit mode demo. You start in insert mode; type away.
+
+  Esc        normal mode        i/a/I/A/o/O  back to insert
+  h/l        move by grapheme   j/k          history (or lines)
+  w/b/e      select word motion (W/B/E for WORDS), counts work: 3w
+  f/t/F/T    select to a character
+  gh/gl/gs   line start / line end / first non-blank
+  gg/ge      buffer start / buffer end
+  x          select the current line
+  v          select mode (motions extend), ;  collapse, Alt-;  flip ends
+  d/c/y      delete / change / yank the selection (or the cursor char)
+  p/P        paste after / before,  u/U  undo / redo,  r<ch>  replace
+  %          select all,  ~  switch case
+
+Submit with Enter (returns to insert). Abort with Ctrl-C, quit with Ctrl-D."
     );
 
     let prompt = DefaultPrompt::default();

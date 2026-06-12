@@ -56,6 +56,10 @@ pub enum PromptEditMode {
     /// A vi-specific mode
     Vi(PromptViMode),
 
+    /// A Helix-specific mode: `Normal` covers Helix's normal *and* select
+    /// modes (both rest a one-grapheme block cursor), `Insert` is text entry.
+    Helix(PromptViMode),
+
     /// A custom mode
     Custom(String),
 }
@@ -64,13 +68,15 @@ impl PromptEditMode {
     pub(crate) fn rest_policy(&self) -> RestPolicy {
         match self {
             PromptEditMode::Vi(PromptViMode::Normal) => RestPolicy::OnGrapheme,
+            PromptEditMode::Helix(PromptViMode::Normal) => RestPolicy::Block,
             PromptEditMode::Vi(PromptViMode::Insert)
+            | PromptEditMode::Helix(PromptViMode::Insert)
             | PromptEditMode::Default
             | PromptEditMode::Emacs => RestPolicy::Between,
             // No catch-all `_ =>` arm over the variants on purpose: a future
-            // variant (e.g. a Helix mode) then fails to compile here until it is
-            // given an explicit policy, rather than silently defaulting. The `_`
-            // below only ignores the custom mode's name.
+            // variant then fails to compile here until it is given an explicit
+            // policy, rather than silently defaulting. The `_` below only
+            // ignores the custom mode's name.
             PromptEditMode::Custom(_) => RestPolicy::Between,
         }
     }
@@ -106,6 +112,14 @@ pub enum PromptEditModeDiscriminants {
     #[strum(serialize = "ViInsert", serialize = "vi_insert")]
     ViInsert,
 
+    /// Helix normal/select mode
+    #[strum(serialize = "HelixNormal", serialize = "helix_normal")]
+    HelixNormal,
+
+    /// Helix insert mode
+    #[strum(serialize = "HelixInsert", serialize = "helix_insert")]
+    HelixInsert,
+
     /// A custom mode
     Custom,
 }
@@ -124,6 +138,8 @@ impl Display for PromptEditMode {
             Self::Emacs => write!(f, "Emacs"),
             Self::Vi(Vi::Normal) => write!(f, "Vi_Normal"),
             Self::Vi(Vi::Insert) => write!(f, "Vi_Insert"),
+            Self::Helix(Vi::Normal) => write!(f, "Helix_Normal"),
+            Self::Helix(Vi::Insert) => write!(f, "Helix_Insert"),
             Self::Custom(s) => write!(f, "Custom_{s}"),
         }
     }
@@ -139,6 +155,8 @@ impl IntoDiscriminant for PromptEditMode {
             Self::Emacs => Self::Discriminant::Emacs,
             Self::Vi(Vi::Normal) => Self::Discriminant::ViNormal,
             Self::Vi(Vi::Insert) => Self::Discriminant::ViInsert,
+            Self::Helix(Vi::Normal) => Self::Discriminant::HelixNormal,
+            Self::Helix(Vi::Insert) => Self::Discriminant::HelixInsert,
             Self::Custom(_) => Self::Discriminant::Custom,
         }
     }

@@ -103,22 +103,25 @@ pub(crate) fn resolve_motion(buf: &str, origin: usize, target: MotionTarget) -> 
 }
 
 /// Resolve a [`MotionTarget`] as a *selection-first* (Helix-style) motion: the
-/// returned [`Cursor`] spans the text the motion travels over, with both ends
-/// given as **included grapheme positions** (the editor's inclusive-selection
-/// convention under `RestPolicy::OnGrapheme`). The head is the side the cursor
-/// rests on; for a forward motion that is the last grapheme of the span —
-/// `prev_grapheme(op_end)` — so the cursor sits *inside* the selection.
+/// returned [`Cursor`] is the **gap-indexed** range the motion travels over,
+/// exactly Helix's convention — `start()..end()` is the covered byte span and
+/// the caret grapheme is [`Cursor::caret`]. For a forward motion the head is
+/// the motion's `op_end` (one past the last covered grapheme); for a backward
+/// motion the head is the resolved position and the anchor sits one past the
+/// origin grapheme so the origin stays covered.
 ///
 /// Word targets follow Helix's anchor rule (`movement::word_move` /
-/// `range_to_target`): the anchor normally stays on the origin grapheme, but
-/// when the motion's boundary lies immediately at the cursor — the head
-/// "effectively starts on a boundary" — the anchor hops past the origin
-/// grapheme, and a forward word-*start* additionally selects through the
-/// *next* boundary (this is what makes repeated `w` walk word by word instead
-/// of sticking on the space between two words).
+/// `range_to_target`): the anchor normally stays at the origin, but when the
+/// motion's boundary lies immediately at the cursor — the head "effectively
+/// starts on a boundary" — the anchor hops past the origin grapheme, and a
+/// forward word-*start* additionally selects through the *next* boundary
+/// (this is what makes repeated `w` walk word by word instead of sticking on
+/// the space between two words).
 ///
 /// Total like [`resolve_motion`]: a motion that cannot move collapses to a
-/// point at `origin` rather than panicking.
+/// point at `origin` rather than panicking. Consumers under the vi-style
+/// inclusive convention (`RestPolicy::OnGrapheme`) pull the range's high end
+/// back one grapheme — see `Editor::select_to_target`.
 pub(crate) fn resolve_selection(buf: &str, origin: usize, target: MotionTarget) -> Cursor {
     let m = resolve_motion(buf, origin, target);
     if m.head == origin {
@@ -126,16 +129,16 @@ pub(crate) fn resolve_selection(buf: &str, origin: usize, target: MotionTarget) 
     }
 
     if m.head < origin {
-        // Backward: the origin grapheme is included, unless the boundary the
-        // motion seeks sits immediately before it — `b` pressed on a word's
-        // first grapheme selects only what lies behind the word, not the
-        // grapheme under the cursor (Helix re-anchors past it).
+        // Backward: cover the origin grapheme (anchor one past it), unless
+        // the boundary the motion seeks sits immediately before it — `b`
+        // pressed on a word's first grapheme selects only what lies behind
+        // the word (Helix re-anchors past the cursor grapheme).
         let anchor = if word_boundary_at_origin(buf, origin, target, Direction::Backward) {
-            prev_grapheme_boundary(buf, origin)
-        } else {
             origin
+        } else {
+            next_grapheme_boundary(buf, origin)
         };
-        return Cursor::new(anchor.max(m.head), m.head);
+        return Cursor::new(anchor, m.head);
     }
 
     // Forward.
@@ -156,8 +159,7 @@ pub(crate) fn resolve_selection(buf: &str, origin: usize, target: MotionTarget) 
         } if on_boundary => (next, m),
         _ => (origin, m),
     };
-    let head = prev_grapheme_boundary(buf, movement.op_end);
-    Cursor::new(anchor, head.max(anchor))
+    Cursor::new(anchor, movement.op_end.max(anchor))
 }
 
 /// Helix's `reached_target` evaluated at the cursor itself: does the boundary
@@ -412,95 +414,102 @@ mod tests {
 
     // --- selection-first resolution (Helix motions) ---
     //
-    // `resolve_selection` returns a Cursor whose anchor and head are both
-    // *included* grapheme positions (the editor's inclusive-selection
-    // convention). Expectations below are checked against Helix's
-    // `movement::word_move` semantics.
+    // `resolve_selection` returns a gap-indexed Cursor, exactly Helix's Range
+    // convention: `start()..end()` is the covered byte span, the caret rests
+    // on the grapheme before a forward head. Expectations are checked against
+    // Helix's `movement::word_move` semantics.
 
     #[test]
     fn resolve_selection_word_start_selects_through_the_gap() {
-        // `w` from 'f' in "foo bar": selection "foo " — anchor on 'f',
-        // head resting on the space *before* the next word, not on 'b'.
+        // `w` from 'f' in "foo bar": Range(0, 4) covers "foo " — the caret on
+        // the space *before* the next word, not on 'b'.
         let sel = resolve_selection("foo bar", 0, word(WordEdge::Start, Direction::Forward));
-        assert_eq!((sel.anchor(), sel.head()), (0, 3));
+        assert_eq!((sel.anchor(), sel.head()), (0, 4));
+        assert_eq!(sel.caret("foo bar"), 3);
     }
 
     #[test]
     fn resolve_selection_word_start_hops_when_cursor_touches_the_boundary() {
-        // "foo bar baz", cursor on the space at 3 — exactly where the previous
+        // "foo bar baz", caret on the space at 3 — exactly where the previous
         // `w` parked it. Helix re-anchors past the boundary and selects the
-        // *next* span "bar " (4..=7); a naive span-from-origin would collapse
+        // *next* span "bar " (4..8); a naive span-from-origin would collapse
         // onto the space and stick there forever.
         let sel = resolve_selection("foo bar baz", 3, word(WordEdge::Start, Direction::Forward));
-        assert_eq!((sel.anchor(), sel.head()), (4, 7));
+        assert_eq!((sel.anchor(), sel.head()), (4, 8));
     }
 
     #[test]
     fn resolve_selection_word_start_from_space_before_last_word() {
-        // "a b", cursor on the space: the hop lands on 'b' and the span is just
+        // "a b", caret on the space: the hop lands on 'b' and the span is just
         // that final word.
         let sel = resolve_selection("a b", 1, word(WordEdge::Start, Direction::Forward));
-        assert_eq!((sel.anchor(), sel.head()), (2, 2));
+        assert_eq!((sel.anchor(), sel.head()), (2, 3));
     }
 
     #[test]
     fn resolve_selection_word_end_includes_cursor_unless_on_word_end() {
-        // `e` from 'f': selection "foo", head on the last 'o'.
+        // `e` from 'f': Range(0, 3) covers "foo", caret on the last 'o'.
         let sel = resolve_selection("foo bar", 0, word(WordEdge::End, Direction::Forward));
-        assert_eq!((sel.anchor(), sel.head()), (0, 2));
+        assert_eq!((sel.anchor(), sel.head()), (0, 3));
         // `e` from the last 'o' (a word end): Helix re-anchors past the cursor
-        // grapheme — selection " bar" (3..=6), the 'o' is *not* included.
+        // grapheme — Range(3, 7) covers " bar", the 'o' is *not* included.
         let sel = resolve_selection("foo bar", 2, word(WordEdge::End, Direction::Forward));
-        assert_eq!((sel.anchor(), sel.head()), (3, 6));
+        assert_eq!((sel.anchor(), sel.head()), (3, 7));
     }
 
     #[test]
     fn resolve_selection_word_back_excludes_cursor_on_word_start() {
-        // `b` from 'b' (a word start): selection "foo " (head 0, last included
-        // grapheme the space at 3) — the 'b' itself is excluded.
+        // `b` from 'b' (a word start): Range(4, 0) covers "foo " — the 'b'
+        // itself is excluded, caret on 'f'.
         let sel = resolve_selection("foo bar", 4, word(WordEdge::Start, Direction::Backward));
-        assert_eq!((sel.anchor(), sel.head()), (3, 0));
+        assert_eq!((sel.anchor(), sel.head()), (4, 0));
+        assert_eq!(sel.caret("foo bar"), 0);
     }
 
     #[test]
     fn resolve_selection_word_back_includes_cursor_mid_word() {
-        // `b` from 'a' (mid-word): selection "ba" — cursor grapheme included.
+        // `b` from 'a' (mid-word): Range(6, 4) covers "ba" — the cursor
+        // grapheme stays covered (anchor one past it).
         let sel = resolve_selection("foo bar", 5, word(WordEdge::Start, Direction::Backward));
-        assert_eq!((sel.anchor(), sel.head()), (5, 4));
+        assert_eq!((sel.anchor(), sel.head()), (6, 4));
     }
 
     #[test]
     fn resolve_selection_find_spans_origin_to_hit() {
-        // `f b`: selection "foo b", head on the found char.
+        // `f b`: Range(0, 5) covers "foo b", caret on the found char.
         let sel = resolve_selection("foo bar", 0, find('b', Direction::Forward, FindStop::On));
-        assert_eq!((sel.anchor(), sel.head()), (0, 4));
+        assert_eq!((sel.anchor(), sel.head()), (0, 5));
+        assert_eq!(sel.caret("foo bar"), 4);
         // `t b` stops one short.
         let sel = resolve_selection(
             "foo bar",
             0,
             find('b', Direction::Forward, FindStop::Before),
         );
-        assert_eq!((sel.anchor(), sel.head()), (0, 3));
-        // backward `F f` from 'r': cursor grapheme included, head on the hit.
+        assert_eq!((sel.anchor(), sel.head()), (0, 4));
+        // backward `F f` from 'r': the cursor grapheme stays covered
+        // (anchor 7), head on the hit.
         let sel = resolve_selection("foo bar", 6, find('f', Direction::Backward, FindStop::On));
-        assert_eq!((sel.anchor(), sel.head()), (6, 0));
+        assert_eq!((sel.anchor(), sel.head()), (7, 0));
     }
 
     #[test]
-    fn resolve_selection_stuck_motion_collapses_to_a_point() {
-        // Totality: a motion that cannot move yields a point at the origin.
+    fn resolve_selection_at_buffer_end_covers_the_tail() {
+        // `w` on the last grapheme runs to the buffer end and still covers it
+        // (Helix's early-out keeps the block); a missed find is a no-op point.
         let sel = resolve_selection("foo", 2, word(WordEdge::Start, Direction::Forward));
-        assert!(sel.is_empty());
+        assert_eq!((sel.anchor(), sel.head()), (2, 3));
         let sel = resolve_selection("foo bar", 3, find('z', Direction::Forward, FindStop::On));
         assert!(sel.is_empty());
     }
 
     #[test]
-    fn resolve_selection_line_edge_rests_on_last_grapheme() {
-        // Forward to the line edge (Helix `x`'s second half): the head rests on
-        // the line's last grapheme, not on the `\n`.
+    fn resolve_selection_line_edge_covers_the_line_content() {
+        // Forward to the line edge (Helix `x`'s second half): the span runs to
+        // the line end, caret resting on the last grapheme, `\n` untouched.
         let sel = resolve_selection("ab\ncd", 0, MotionTarget::LineEdge(Direction::Forward));
-        assert_eq!((sel.anchor(), sel.head()), (0, 1));
+        assert_eq!((sel.anchor(), sel.head()), (0, 2));
+        assert_eq!(sel.caret("ab\ncd"), 1);
     }
 
     // --- line / buffer edges (`0`/`$`/`gg`/`G`) ---

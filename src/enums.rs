@@ -347,11 +347,13 @@ pub enum EditCommand {
 
     /// Select the span a [`MotionTarget`] travels over, replacing any previous
     /// selection — the Helix-style selection-first motion. The anchor is
-    /// planted at the near edge of the span and the head rests on its last
+    /// planted at the near edge of the span and the caret rests on its last
     /// grapheme, so the cursor sits *inside* the selection (Helix `w`/`b`/`e`/
-    /// `f`). Contrast [`EditCommand::Move`] (collapse) and
-    /// [`EditCommand::Extend`] (keep the anchor): `Select` is the third anchor
-    /// policy — re-anchor, then move.
+    /// `f`). Under the Helix mode's block-cursor policy the stored range is
+    /// gap-indexed exactly like Helix's `Range`; under vi-style modes the head
+    /// is converted to rest *on* the final grapheme. Contrast
+    /// [`EditCommand::Move`] (collapse) and [`EditCommand::Extend`] (keep the
+    /// anchor): `Select` is the third anchor policy — re-anchor, then move.
     Select(MotionTarget),
 
     /// Cut the text between the cursor and a [`MotionTarget`] into the cut buffer.
@@ -666,6 +668,12 @@ pub enum EditCommand {
     /// Swap the positions of the cursor and anchor
     SwapCursorAndAnchor,
 
+    /// Collapse the selection (or a block cursor's width) to a caret at one of
+    /// its edges: `Backward` = the start, `Forward` = the end. Helix's `i`
+    /// (insert before the selection) and `a` (append after it) lower to this
+    /// before entering insert mode.
+    CollapseSelection(Direction),
+
     /// Cut selection to system clipboard
     #[cfg(feature = "system_clipboard")]
     CutSelectionSystem,
@@ -839,6 +847,7 @@ impl EditCommand {
             EditCommand::Move(_) => EditType::MoveCursor { select: false },
             EditCommand::Extend(_) => EditType::MoveCursor { select: true },
             EditCommand::Select(_) => EditType::MoveCursor { select: true },
+            EditCommand::CollapseSelection(_) => EditType::MoveCursor { select: false },
             EditCommand::Cut { .. } => EditType::EditText,
             EditCommand::Copy { .. } => EditType::NoOp,
             EditCommand::Change { .. } => EditType::EditText,

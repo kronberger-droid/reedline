@@ -25,9 +25,8 @@ pub(crate) enum RestPolicy {
     /// The resting cursor always covers exactly one grapheme: a point is widened
     /// onto the grapheme to its right, or — at the buffer end, where there is
     /// none — onto the grapheme to its left. Mirrors Helix's `Range::min_width_1`.
-    /// Vi normal / Helix. No producer until those modes are wired, so it is
-    /// intentionally unconstructed for now.
-    #[allow(dead_code)]
+    /// Produced by the Helix edit mode's normal/select modes
+    /// (`PromptEditMode::Helix(Normal)`).
     Block,
 }
 

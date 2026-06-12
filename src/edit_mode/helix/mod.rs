@@ -51,11 +51,12 @@ enum Pending {
 ///   cursor (Helix's "the cursor is a one-grapheme selection"): `d`/`c` lower
 ///   to [`EditCommand::CutChar`], `y` to [`EditCommand::CopyChar`].
 ///
-/// Known deviations from Helix, inherited from the line-editor context: the
-/// cursor cannot rest on a line's `\n` cell (the `OnGrapheme` rest policy pulls
-/// it onto the last grapheme, like vi), `x` selects the line's content rather
-/// than extending line-by-line, and `i` collapses the selection at the head
-/// instead of jumping to its start.
+/// Normal and select mode rest under the *Block* rest policy: the resting
+/// cursor is a one-grapheme range (Helix's min-width-1 invariant), it may
+/// rest on a line's `\n` cell, and selections are gap-indexed like Helix's
+/// `Range`. Known deviations, inherited from the line-editor context: `x`
+/// selects the line's content rather than extending line-by-line, and `r`
+/// replaces only the cursor grapheme.
 pub struct Helix {
     insert_keybindings: Keybindings,
     normal_keybindings: Keybindings,
@@ -289,10 +290,10 @@ impl Helix {
                 };
                 ReedlineEvent::Repaint
             }
-            'i' => self.enter_insert(vec![]),
-            'a' => self.enter_insert(vec![EditCommand::Move(MotionTarget::Grapheme(
-                Direction::Forward,
-            ))]),
+            // Insert before / append after the selection (or the block
+            // cursor's grapheme): collapse to the matching edge first.
+            'i' => self.enter_insert(vec![EditCommand::CollapseSelection(Direction::Backward)]),
+            'a' => self.enter_insert(vec![EditCommand::CollapseSelection(Direction::Forward)]),
             'I' => self.enter_insert(vec![EditCommand::MoveToLineNonBlankStart { select: false }]),
             'A' => self.enter_insert(vec![EditCommand::MoveToLineEnd { select: false }]),
             'o' => self.enter_insert(vec![EditCommand::InsertNewlineBelow]),
@@ -437,8 +438,10 @@ impl EditMode for Helix {
 
     fn edit_mode(&self) -> PromptEditMode {
         match self.mode {
-            HelixMode::Normal | HelixMode::Select => PromptEditMode::Vi(PromptViMode::Normal),
-            HelixMode::Insert => PromptEditMode::Vi(PromptViMode::Insert),
+            // Normal and select both rest a one-grapheme block cursor
+            // (`RestPolicy::Block`), Helix's min-width-1 invariant.
+            HelixMode::Normal | HelixMode::Select => PromptEditMode::Helix(PromptViMode::Normal),
+            HelixMode::Insert => PromptEditMode::Helix(PromptViMode::Insert),
         }
     }
 }
@@ -482,7 +485,7 @@ mod test {
         let mut helix = Helix::default();
         assert!(matches!(
             helix.edit_mode(),
-            PromptEditMode::Vi(PromptViMode::Insert)
+            PromptEditMode::Helix(PromptViMode::Insert)
         ));
         assert_eq!(
             helix.parse_event(chr('a')),
@@ -501,7 +504,7 @@ mod test {
         );
         assert!(matches!(
             helix.edit_mode(),
-            PromptEditMode::Vi(PromptViMode::Normal)
+            PromptEditMode::Helix(PromptViMode::Normal)
         ));
     }
 
@@ -647,14 +650,23 @@ mod test {
     }
 
     #[test]
-    fn a_steps_right_then_inserts() {
+    fn i_and_a_collapse_to_the_selection_edges() {
+        // `i` inserts before the selection (or block cursor), `a` after it.
         let mut helix = normal();
         assert_eq!(
             helix.parse_event(chr('a')),
             ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![EditCommand::Move(MotionTarget::Grapheme(
-                    Direction::Forward
-                ))]),
+                ReedlineEvent::Edit(vec![EditCommand::CollapseSelection(Direction::Forward)]),
+                ReedlineEvent::Repaint,
+            ])
+        );
+        assert!(matches!(helix.mode, HelixMode::Insert));
+
+        let mut helix = normal();
+        assert_eq!(
+            helix.parse_event(chr('i')),
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![EditCommand::CollapseSelection(Direction::Backward)]),
                 ReedlineEvent::Repaint,
             ])
         );

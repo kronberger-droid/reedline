@@ -2464,7 +2464,7 @@ mod tests {
 
         assert!(matches!(
             reedline.prompt_edit_mode(),
-            PromptEditMode::Vi(PromptViMode::Insert)
+            PromptEditMode::Helix(PromptViMode::Insert)
         ));
     }
 

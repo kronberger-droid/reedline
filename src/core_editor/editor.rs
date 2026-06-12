@@ -1,3 +1,4 @@
+use super::graphemes::prev_grapheme_boundary;
 use super::{edit_stack::EditStack, Clipboard, Cursor, LineBuffer};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
@@ -27,6 +28,10 @@ pub struct Editor {
     /// before the cut) can't change the operated range. `None` when no selection.
     selection_inclusive: Option<bool>,
     edit_mode: PromptEditMode,
+    /// Set when `sync_edit_mode` adopted a different rest policy without
+    /// committing; cleared by the next commit. Lets the pre-paint
+    /// `set_edit_mode` settle transitions that emitted no edit command.
+    policy_unsettled: bool,
 }
 
 enum OperatorVerb {
@@ -50,6 +55,7 @@ impl Default for Editor {
             last_undo_behavior: UndoBehavior::CreateUndoPoint,
             selection_inclusive: None,
             edit_mode: PromptEditMode::Default,
+            policy_unsettled: false,
         }
     }
 }
@@ -101,6 +107,15 @@ impl Editor {
                 self.move_head_to(head, true);
             }
             EditCommand::Select(t) => self.select_to_target(*t),
+            EditCommand::CollapseSelection(direction) => {
+                let cursor = self.line_buffer.cursor();
+                let pos = match direction {
+                    Direction::Backward => cursor.start(),
+                    Direction::Forward => cursor.end(),
+                };
+                self.line_buffer.set_cursor(Cursor::point(pos));
+                self.selection_inclusive = None;
+            }
             EditCommand::Cut {
                 target,
                 granularity,
@@ -278,7 +293,23 @@ impl Editor {
     }
 
     pub(crate) fn clear_selection(&mut self) {
-        self.line_buffer.clear_selection();
+        // Collapse onto the caret grapheme, not the head gap: under Block the
+        // head of a forward range sits one past the covered grapheme, and a
+        // head-collapse would walk the block cursor forward on every
+        // non-selecting command (h/l would double-step). The commit boundary
+        // re-widens the point onto the same grapheme.
+        let cursor = self.line_buffer.cursor();
+        if self.edit_mode.rest_policy() == RestPolicy::Block
+            && cursor.end() <= self.line_buffer.len()
+        {
+            let caret = cursor.caret(self.line_buffer.get_buffer());
+            self.line_buffer.set_cursor(Cursor::point(caret));
+        } else {
+            // This runs mid-command (before the commit clamp), so an edit may
+            // have left the cursor transiently past the buffer; the plain
+            // collapse is always safe and the commit boundary settles it.
+            self.line_buffer.clear_selection();
+        }
         self.selection_inclusive = None;
     }
 
@@ -340,9 +371,13 @@ impl Editor {
     pub fn set_edit_mode(&mut self, mode: PromptEditMode) {
         // Called on every repaint, so skip the work when nothing relevant moved.
         // `commit_cursor` depends only on the rest policy, and the cursor is
-        // already committed under the old one; re-normalize only when the policy
-        // actually changes (e.g. Vi insert → normal tightens to `OnGrapheme`).
-        let policy_changed = mode.rest_policy() != self.edit_mode.rest_policy();
+        // already committed under the old one; re-normalize when the policy
+        // actually changes (e.g. Vi insert → normal tightens to `OnGrapheme`)
+        // — or when a `sync_edit_mode` left a policy switch unsettled and no
+        // command committed since (a transition that emitted no edit command,
+        // like Helix's Esc, would otherwise never settle the cursor).
+        let policy_changed =
+            self.policy_unsettled || mode.rest_policy() != self.edit_mode.rest_policy();
         self.edit_mode = mode;
         if policy_changed {
             self.commit_cursor();
@@ -355,10 +390,13 @@ impl Editor {
     /// are run, so those commands resolve under the new [`RestPolicy`] (e.g.
     /// the Esc→normal grapheme step-back reads `OnGrapheme`). The cursor is
     /// deliberately left where insert mode put it: the emitted commands move
-    /// and commit it under the new policy, and any no-command transition is
-    /// settled by the pre-paint `set_edit_mode`. Committing here would pull a
-    /// caret at the line end back a grapheme, double-stepping the Esc move.
+    /// and commit it under the new policy, and a no-command transition is
+    /// settled by the pre-paint `set_edit_mode` via the `policy_unsettled`
+    /// flag. Committing here would pull a caret at the line end back a
+    /// grapheme, double-stepping the Esc move.
     pub fn sync_edit_mode(&mut self, mode: PromptEditMode) {
+        self.policy_unsettled =
+            self.policy_unsettled || mode.rest_policy() != self.edit_mode.rest_policy();
         self.edit_mode = mode;
     }
 
@@ -371,7 +409,10 @@ impl Editor {
             self.line_buffer.cursor(),
             self.edit_mode.rest_policy(),
         );
-        self.line_buffer.set_cursor(committed);
+        // `set_resting_cursor`: Block's widening of a bare point onto a
+        // grapheme is structural width, not a selection.
+        self.line_buffer.set_resting_cursor(committed);
+        self.policy_unsettled = false;
     }
 
     fn move_to_position(&mut self, position: usize, select: bool) {
@@ -430,7 +471,27 @@ impl Editor {
     /// span's last grapheme. The selection sink for [`EditCommand::Select`],
     /// beside [`Editor::move_head_to`] which serves `Move`/`Extend`.
     fn select_to_target(&mut self, target: MotionTarget) {
-        let selection = resolve_selection(self.get_buffer(), self.insertion_point(), target);
+        let origin = self.insertion_point();
+        let selection = resolve_selection(self.get_buffer(), origin, target);
+        // The resolver speaks Helix's gap convention: the range's high end is
+        // one past the last covered grapheme. Block consumes it as is; the
+        // vi-style policies put the head *on* a grapheme, so pull the high
+        // end back — the inclusivity captured below restores the covered span
+        // at operate time.
+        let selection = if self.edit_mode.rest_policy() == RestPolicy::Block || selection.is_empty()
+        {
+            selection
+        } else {
+            let buf = self.get_buffer();
+            if selection.head() >= selection.anchor() {
+                selection.move_head(prev_grapheme_boundary(buf, selection.head()))
+            } else {
+                Cursor::new(
+                    prev_grapheme_boundary(buf, selection.anchor()),
+                    selection.head(),
+                )
+            }
+        };
         self.line_buffer.set_cursor(selection);
         self.commit_cursor();
         // Capture inclusivity exactly like an anchor planted on the motion
@@ -479,7 +540,18 @@ impl Editor {
     }
 
     pub(crate) fn insertion_point(&self) -> usize {
-        self.line_buffer.insertion_point()
+        // Under Block the head of a forward range is gap-indexed — one past
+        // the grapheme the cursor visually covers. Every consumer of "the
+        // position" (motion origins, painting, hinting) wants the covered
+        // grapheme, which is exactly `Cursor::caret`. The other policies keep
+        // the head-as-position convention unchanged.
+        if self.edit_mode.rest_policy() == RestPolicy::Block {
+            self.line_buffer
+                .cursor()
+                .caret(self.line_buffer.get_buffer())
+        } else {
+            self.line_buffer.insertion_point()
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -1956,6 +2028,138 @@ mod test {
         let (content, _) = editor.cut_buffer.get();
         assert_eq!(content, "foo ");
         assert_eq!(editor.get_buffer(), "foo bar");
+    }
+
+    // --- the Block rest policy (Helix normal/select mode) ---
+    //
+    // Under `PromptEditMode::Helix(Normal)` the resting cursor is a
+    // one-grapheme gap-indexed range (min-width-1), `insertion_point()`
+    // reports the *covered* grapheme, and selections are gap ranges (no
+    // inclusive extension).
+
+    fn helix_editor(buffer: &str) -> Editor {
+        let mut editor = editor_with(buffer);
+        editor.set_edit_mode(PromptEditMode::Helix(PromptViMode::Normal));
+        editor
+    }
+
+    #[test]
+    fn block_rest_widens_bare_cursor_onto_a_grapheme() {
+        // set_buffer parks the caret at the end; the Block commit covers the
+        // last grapheme instead, without planting a selection.
+        let editor = helix_editor("foo");
+        assert_eq!(editor.line_buffer().cursor(), Cursor::new(2, 3));
+        assert_eq!(editor.insertion_point(), 2);
+        assert_eq!(editor.get_selection(), None);
+    }
+
+    #[test]
+    fn block_grapheme_moves_step_one_cell_per_press() {
+        // The caret-collapse in clear_selection keeps h/l from double-stepping
+        // (a head-collapse would re-widen one grapheme further each time).
+        let mut editor = helix_editor("abc");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::Grapheme(
+            Direction::Forward,
+        )));
+        assert_eq!(editor.insertion_point(), 1);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::Grapheme(
+            Direction::Forward,
+        )));
+        assert_eq!(editor.insertion_point(), 2);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::Grapheme(
+            Direction::Backward,
+        )));
+        assert_eq!(editor.insertion_point(), 1);
+    }
+
+    #[test]
+    fn block_cursor_may_rest_on_the_newline_cell() {
+        // Unlike vi's OnGrapheme, Helix lets the block cover a line's `\n`.
+        let mut editor = helix_editor("ab\ncd");
+        editor.line_buffer.set_insertion_point(1);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::LineEdge(
+            Direction::Forward,
+        )));
+        assert_eq!(editor.line_buffer().cursor(), Cursor::new(2, 3));
+        assert_eq!(editor.insertion_point(), 2); // the \n cell
+    }
+
+    #[test]
+    fn block_select_word_is_a_gap_range() {
+        let mut editor = helix_editor("foo bar baz");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        // gap range — no inclusive extension; caret on the space
+        assert_eq!(editor.get_selection(), Some((0, 4)));
+        assert_eq!(editor.insertion_point(), 3);
+        // the second `w` hops the boundary and walks onto "bar "
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        assert_eq!(editor.get_selection(), Some((4, 8)));
+        assert_eq!(editor.insertion_point(), 7);
+    }
+
+    #[test]
+    fn block_cut_char_eats_the_covered_grapheme() {
+        // `d` on a bare block cursor must cut the *covered* grapheme, not the
+        // one after the gap-indexed head.
+        let mut editor = helix_editor("abc");
+        editor.line_buffer.set_insertion_point(1);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::Grapheme(
+            Direction::Backward,
+        )));
+        editor.run_edit_command(&EditCommand::CutChar);
+        assert_eq!(editor.get_buffer(), "bc");
+    }
+
+    #[test]
+    fn block_paste_does_not_consume_the_bare_cursor() {
+        // A bare block's width is structural, not a selection: `p` must paste
+        // after the covered grapheme without deleting it.
+        let mut editor = helix_editor("ab");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Move(MotionTarget::Grapheme(
+            Direction::Backward,
+        )));
+        editor.cut_buffer.set("X", Granularity::CharWise);
+        editor.run_edit_command(&EditCommand::PasteCutBufferAfter);
+        assert_eq!(editor.get_buffer(), "aXb");
+    }
+
+    #[test]
+    fn block_collapse_selection_lands_on_either_edge() {
+        // Replicates the `a`/`i` seam: the mode flips to insert and the engine
+        // relays the Between policy *before* the collapse runs, so the caret
+        // settles as a point at the selection's edge.
+        let mut editor = helix_editor("foo bar");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word())); // "foo "
+        editor.sync_edit_mode(PromptEditMode::Helix(PromptViMode::Insert));
+        // collapse forward: caret gap after the selection (Helix `a`)
+        editor.run_edit_command(&EditCommand::CollapseSelection(Direction::Forward));
+        assert_eq!(editor.get_selection(), None);
+        assert_eq!(editor.line_buffer().cursor(), Cursor::point(4));
+
+        let mut editor = helix_editor("foo bar");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        editor.sync_edit_mode(PromptEditMode::Helix(PromptViMode::Insert));
+        // collapse backward: caret before the selection (Helix `i`)
+        editor.run_edit_command(&EditCommand::CollapseSelection(Direction::Backward));
+        assert_eq!(editor.get_selection(), None);
+        assert_eq!(editor.line_buffer().cursor(), Cursor::point(0));
+    }
+
+    #[test]
+    fn block_select_then_cut_consumes_the_exact_span() {
+        // The Helix `wd` chain under Block: gap range in, gap range out.
+        let mut editor = helix_editor("foo bar baz");
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::Select(helix_word()));
+        editor.run_edit_command(&EditCommand::CutChar);
+        assert_eq!(editor.get_buffer(), "bar baz");
+        let (content, _) = editor.cut_buffer.get();
+        assert_eq!(content, "foo ");
     }
 
     #[test]

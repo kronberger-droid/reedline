@@ -1166,6 +1166,10 @@ impl Painter {
         }
         Ok(())
     }
+    #[cfg(test)]
+    pub(crate) fn force_prompt_anchored_for_test(&mut self, row: u16) {
+        self.prompt_start_row = PromptStartRow::Verified(row);
+    }
 }
 
 #[cfg(test)]

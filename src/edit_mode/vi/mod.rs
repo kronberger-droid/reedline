@@ -434,7 +434,7 @@ mod test {
             result,
             ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Cut {
                 target: MotionTarget::Word {
-                    kind: WordKind::Small,
+                    kind: WordKind::Word,
                     edge: WordEdge::Start,
                     direction: Direction::Forward,
                 },
@@ -471,7 +471,7 @@ mod test {
             result,
             ReedlineEvent::Multiple(vec![ReedlineEvent::Edit(vec![EditCommand::Move(
                 MotionTarget::Word {
-                    kind: WordKind::Big,
+                    kind: WordKind::LongWord,
                     edge: WordEdge::Start,
                     direction: Direction::Forward,
                 }
@@ -644,7 +644,7 @@ mod test {
 
         let cut_word = ReedlineEvent::Edit(vec![EditCommand::Cut {
             target: MotionTarget::Word {
-                kind: WordKind::Small,
+                kind: WordKind::Word,
                 edge: WordEdge::Start,
                 direction: Direction::Forward,
             },
@@ -667,7 +667,7 @@ mod test {
         let result = vi.parse_event(key(KeyCode::Char('w'), KeyModifiers::NONE));
 
         let mv = ReedlineEvent::Edit(vec![EditCommand::Move(MotionTarget::Word {
-            kind: WordKind::Small,
+            kind: WordKind::Word,
             edge: WordEdge::Start,
             direction: Direction::Forward,
         })]);

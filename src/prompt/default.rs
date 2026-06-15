@@ -1,4 +1,6 @@
-use crate::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode};
+use crate::{
+    HelixMode, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
+};
 
 use {
     chrono::Local,
@@ -62,9 +64,13 @@ impl Prompt for DefaultPrompt {
     fn render_prompt_indicator(&self, edit_mode: PromptEditMode) -> Cow<'_, str> {
         match edit_mode {
             PromptEditMode::Default | PromptEditMode::Emacs => DEFAULT_PROMPT_INDICATOR.into(),
-            PromptEditMode::Vi(vi_mode) | PromptEditMode::Helix(vi_mode) => match vi_mode {
+            PromptEditMode::Vi(vi_mode) => match vi_mode {
                 PromptViMode::Normal => DEFAULT_VI_NORMAL_PROMPT_INDICATOR.into(),
                 PromptViMode::Insert => DEFAULT_VI_INSERT_PROMPT_INDICATOR.into(),
+            },
+            PromptEditMode::Helix(helix_mode) => match helix_mode {
+                HelixMode::Normal | HelixMode::Select => DEFAULT_VI_NORMAL_PROMPT_INDICATOR.into(),
+                HelixMode::Insert => DEFAULT_VI_INSERT_PROMPT_INDICATOR.into(),
             },
             PromptEditMode::Custom(str) => format!("({str})").into(),
         }

@@ -8,21 +8,8 @@ use super::EditMode;
 use crate::{
     edit_mode::keybindings::Keybindings,
     enums::{EditCommand, ReedlineEvent, ReedlineRawEvent},
-    Direction, FindStop, MotionTarget, PromptEditMode, PromptViMode, WordEdge, WordKind,
+    Direction, FindStop, HelixMode, MotionTarget, PromptEditMode, WordEdge, WordKind,
 };
-
-/// The mode the Helix machine is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HelixMode {
-    /// Selection-first command mode: every motion *replaces* the selection
-    /// with the span it travels over (`EditCommand::Select`).
-    Normal,
-    /// Ordinary text entry.
-    Insert,
-    /// Helix's select/extend mode (`v`): motions keep the anchor and only move
-    /// the head (`EditCommand::Extend`).
-    Select,
-}
 
 /// A prefix key waiting for its argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,12 +424,9 @@ impl EditMode for Helix {
     }
 
     fn edit_mode(&self) -> PromptEditMode {
-        match self.mode {
-            // Normal and select both rest a one-grapheme block cursor
-            // (`RestPolicy::Block`), Helix's min-width-1 invariant.
-            HelixMode::Normal | HelixMode::Select => PromptEditMode::Helix(PromptViMode::Normal),
-            HelixMode::Insert => PromptEditMode::Helix(PromptViMode::Insert),
-        }
+        // The prompt mode mirrors the machine's mode directly now; rest-policy
+        // (normal+select both block) is handled in PromptEditMode::rest_policy.
+        PromptEditMode::Helix(self.mode)
     }
 }
 
@@ -485,7 +469,7 @@ mod test {
         let mut helix = Helix::default();
         assert!(matches!(
             helix.edit_mode(),
-            PromptEditMode::Helix(PromptViMode::Insert)
+            PromptEditMode::Helix(HelixMode::Insert)
         ));
         assert_eq!(
             helix.parse_event(chr('a')),
@@ -504,7 +488,7 @@ mod test {
         );
         assert!(matches!(
             helix.edit_mode(),
-            PromptEditMode::Helix(PromptViMode::Normal)
+            PromptEditMode::Helix(HelixMode::Normal)
         ));
     }
 

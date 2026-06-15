@@ -1,5 +1,5 @@
 use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
-use crate::{CursorConfig, PromptEditMode, PromptViMode};
+use crate::{CursorConfig, HelixMode, PromptEditMode, PromptViMode};
 
 use {
     super::utils::{coerce_crlf, estimate_required_lines, line_width},
@@ -608,10 +608,11 @@ impl Painter {
         if let Some(shapes) = cursor_config {
             let shape = match &prompt_mode {
                 PromptEditMode::Emacs => shapes.emacs,
-                PromptEditMode::Vi(PromptViMode::Insert)
-                | PromptEditMode::Helix(PromptViMode::Insert) => shapes.vi_insert,
-                PromptEditMode::Vi(PromptViMode::Normal)
-                | PromptEditMode::Helix(PromptViMode::Normal) => shapes.vi_normal,
+                PromptEditMode::Vi(PromptViMode::Insert) => shapes.vi_insert,
+                PromptEditMode::Vi(PromptViMode::Normal) => shapes.vi_normal,
+                PromptEditMode::Helix(HelixMode::Normal) => shapes.helix_normal,
+                PromptEditMode::Helix(HelixMode::Select) => shapes.helix_select,
+                PromptEditMode::Helix(HelixMode::Insert) => shapes.helix_insert,
                 _ => None,
             };
             if let Some(shape) = shape {

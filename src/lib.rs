@@ -265,8 +265,8 @@ pub use history::{
 
 mod prompt;
 pub use prompt::{
-    DefaultPrompt, DefaultPromptSegment, Prompt, PromptEditMode, PromptEditModeDiscriminants,
-    PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
+    DefaultPrompt, DefaultPromptSegment, HelixMode, Prompt, PromptEditMode,
+    PromptEditModeDiscriminants, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
 };
 
 mod edit_mode;

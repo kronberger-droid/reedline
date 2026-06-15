@@ -1473,7 +1473,7 @@ fn insert_clipboard_content_before(line_buffer: &mut LineBuffer, clipboard: &mut
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::prompt::PromptViMode;
+    use crate::prompt::{HelixMode, PromptViMode};
     use crate::{Direction, FindStop, WordEdge, WordKind};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
@@ -2077,7 +2077,7 @@ mod test {
 
     fn helix_editor(buffer: &str) -> Editor {
         let mut editor = editor_with(buffer);
-        editor.set_edit_mode(PromptEditMode::Helix(PromptViMode::Normal));
+        editor.set_edit_mode(PromptEditMode::Helix(HelixMode::Normal));
         editor
     }
 
@@ -2172,7 +2172,7 @@ mod test {
         let mut editor = helix_editor("foo bar");
         editor.line_buffer.set_insertion_point(0);
         editor.run_edit_command(&EditCommand::Select(helix_word())); // "foo "
-        editor.sync_edit_mode(PromptEditMode::Helix(PromptViMode::Insert));
+        editor.sync_edit_mode(PromptEditMode::Helix(HelixMode::Insert));
         // collapse forward: caret gap after the selection (Helix `a`)
         editor.run_edit_command(&EditCommand::CollapseSelection(Direction::Forward));
         assert_eq!(editor.get_selection(), None);
@@ -2181,7 +2181,7 @@ mod test {
         let mut editor = helix_editor("foo bar");
         editor.line_buffer.set_insertion_point(0);
         editor.run_edit_command(&EditCommand::Select(helix_word()));
-        editor.sync_edit_mode(PromptEditMode::Helix(PromptViMode::Insert));
+        editor.sync_edit_mode(PromptEditMode::Helix(HelixMode::Insert));
         // collapse backward: caret before the selection (Helix `i`)
         editor.run_edit_command(&EditCommand::CollapseSelection(Direction::Backward));
         assert_eq!(editor.get_selection(), None);

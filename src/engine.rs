@@ -1047,8 +1047,10 @@ impl Reedline {
             | ReedlineEvent::Submit
             | ReedlineEvent::SubmitOrNewline => {
                 if let Some(string) = self.history_cursor.string_at_cursor() {
-                    self.editor
-                        .set_buffer(string, UndoBehavior::CreateUndoPoint);
+                    self.editor.set_buffer(
+                        Self::history_entry_to_buffer_lf(string),
+                        UndoBehavior::CreateUndoPoint,
+                    );
                 }
 
                 self.input_mode = InputMode::Regular;
@@ -1681,6 +1683,22 @@ impl Reedline {
     ///
     /// When using the up/down traversal or fish/zsh style prefix search update the main line buffer accordingly.
     /// Not used for the separate modal reverse search!
+    /// Normalize line endings in a recalled history entry to LF before it enters
+    /// the editing buffer.
+    ///
+    /// Mirrors the paste boundary (`vi`/`emacs` `parse_event`), which already
+    /// strips CR: the editing buffer is kept LF-only, while the history store
+    /// itself round-trips entries verbatim (a multiline command saved on Windows
+    /// may carry CRLF). The `contains` guard keeps the common no-CR recall
+    /// allocation-free.
+    fn history_entry_to_buffer_lf(entry: String) -> String {
+        if entry.contains('\r') {
+            entry.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            entry
+        }
+    }
+
     fn update_buffer_from_history(&mut self) {
         match self.history_cursor.get_navigation() {
             _ if self.history_cursor_on_excluded => self.editor.set_buffer(
@@ -1693,8 +1711,10 @@ impl Reedline {
             ),
             HistoryNavigationQuery::Normal(original) => {
                 if let Some(buffer_to_paint) = self.history_cursor.string_at_cursor() {
-                    self.editor
-                        .set_buffer(buffer_to_paint, UndoBehavior::HistoryNavigation);
+                    self.editor.set_buffer(
+                        Self::history_entry_to_buffer_lf(buffer_to_paint),
+                        UndoBehavior::HistoryNavigation,
+                    );
                 } else {
                     // Hack
                     self.editor
@@ -1703,8 +1723,10 @@ impl Reedline {
             }
             HistoryNavigationQuery::PrefixSearch(prefix) => {
                 if let Some(prefix_result) = self.history_cursor.string_at_cursor() {
-                    self.editor
-                        .set_buffer(prefix_result, UndoBehavior::HistoryNavigation);
+                    self.editor.set_buffer(
+                        Self::history_entry_to_buffer_lf(prefix_result),
+                        UndoBehavior::HistoryNavigation,
+                    );
                 } else {
                     self.editor
                         .set_buffer(prefix, UndoBehavior::HistoryNavigation);
@@ -2297,6 +2319,24 @@ mod tests {
         // themselves, so this guards against that bound being dropped.
         fn assert_send<T: Send>() {}
         assert_send::<Reedline>();
+    }
+
+    #[test]
+    fn history_recall_normalizes_crlf_to_lf() {
+        // A history entry stored with CRLF (e.g. a multiline command saved on
+        // Windows) must land in the editing buffer as LF only, matching the
+        // paste boundary. The history store keeps the entry verbatim; only the
+        // recall into the buffer normalizes.
+        let mut reedline = Reedline::create();
+        reedline
+            .history
+            .save(HistoryItem::from_command_line("echo a\r\necho b\rtail"))
+            .expect("Failed to save history");
+
+        reedline.previous_history();
+
+        assert_eq!(reedline.current_buffer_contents(), "echo a\necho b\ntail");
+        assert!(!reedline.current_buffer_contents().contains('\r'));
     }
 
     #[test]

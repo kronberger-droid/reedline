@@ -120,6 +120,24 @@ impl Editor {
                 let head = self.resolve_head(*t);
                 self.move_head_to(head, true);
             }
+            EditCommand::Select(t) => {
+                // Helix `select_*`: drop a fresh anchor at the caret, then extend
+                // the head to the target so the selection covers exactly the span
+                // just travelled — unlike `Extend`, which keeps the prior anchor.
+                let caret = self.insertion_point();
+                self.line_buffer.set_cursor(Cursor::point(caret));
+                let head = self.resolve_head(*t);
+                self.move_head_to(head, true);
+            }
+            EditCommand::CollapseSelection(direction) => {
+                let cursor = self.line_buffer.cursor();
+                let pos = match direction {
+                    Direction::Backward => cursor.start(),
+                    Direction::Forward => cursor.end().min(self.line_buffer.len()),
+                };
+                self.line_buffer.set_cursor(Cursor::point(pos));
+            }
+            EditCommand::CopyChar => self.copy_char(),
             EditCommand::Cut {
                 target,
                 granularity,
@@ -921,6 +939,24 @@ impl Editor {
             let insertion_offset = self.line_buffer.insertion_point();
             let next_char = self.line_buffer.grapheme_right_index();
             self.cut_range(insertion_offset..next_char);
+        }
+    }
+
+    /// Yank counterpart of [`Editor::cut_char`]: the selection if one is active,
+    /// otherwise the grapheme under the cursor — Helix's "the cursor is a
+    /// one-grapheme selection" model for `y`.
+    fn copy_char(&mut self) {
+        if self.line_buffer.selection_anchor().is_some() {
+            self.copy_selection_to_cut_buffer();
+        } else {
+            let insertion_offset = self.line_buffer.insertion_point();
+            let right_index = self.line_buffer.grapheme_right_index();
+            if right_index > insertion_offset {
+                self.cut_buffer.set(
+                    &self.line_buffer.get_buffer()[insertion_offset..right_index],
+                    Granularity::CharWise,
+                );
+            }
         }
     }
 

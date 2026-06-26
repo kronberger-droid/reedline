@@ -349,6 +349,16 @@ pub enum EditCommand {
     /// target while keeping the anchor fixed.
     Extend(MotionTarget),
 
+    /// Select up to a [`MotionTarget`]: drop a fresh anchor at the caret, then
+    /// move the head to the target, so the selection covers exactly the span
+    /// just travelled. This is Helix's `select_*` (re-anchoring) motion, as
+    /// opposed to [`Extend`](Self::Extend) which keeps the prior anchor.
+    Select(MotionTarget),
+
+    /// Collapse the selection onto one of its edges before entering insert mode:
+    /// `Backward` keeps the start (`i`), `Forward` keeps the end (`a`).
+    CollapseSelection(Direction),
+
     /// Cut the text between the cursor and a [`MotionTarget`] into the cut buffer.
     /// `granularity` decides whether the span is taken char-wise or snapped to
     /// whole lines (and tags the register accordingly).
@@ -422,6 +432,11 @@ pub enum EditCommand {
 
     /// Cut the grapheme right from the current insertion point
     CutChar,
+
+    /// Yank counterpart of [`CutChar`](Self::CutChar): copy the selection if one
+    /// is active, otherwise the grapheme under the cursor — matching Helix's
+    /// "the cursor is a one-grapheme selection" model (`y`).
+    CopyChar,
 
     /// Backspace delete a word from the current insertion point
     BackspaceWord,
@@ -821,12 +836,16 @@ impl EditCommand {
             | EditCommand::CopyAroundPair { .. }
             | EditCommand::CopyTextObject { .. } => EditType::NoOp,
 
-            // The six MotionTarget verbs. `Move`/`Extend` carry the old `select`
-            // bool in the verb itself (Extend must be `select: true` so the editor
-            // does not clear the selection it is extending). `Cut`/`Change`/`Erase`
-            // mutate the buffer; `Copy` does not.
+            // The MotionTarget verbs. `Move`/`Extend`/`Select` carry the old
+            // `select` bool in the verb itself (Extend/Select must be `select:
+            // true` so the editor does not clear the selection it is building).
+            // `Cut`/`Change`/`Erase` mutate the buffer; `Copy` does not.
             EditCommand::Move(_) => EditType::MoveCursor { select: false },
-            EditCommand::Extend(_) => EditType::MoveCursor { select: true },
+            EditCommand::Extend(_) | EditCommand::Select(_) => {
+                EditType::MoveCursor { select: true }
+            }
+            EditCommand::CollapseSelection(_) => EditType::MoveCursor { select: false },
+            EditCommand::CopyChar => EditType::NoOp,
             EditCommand::Cut { .. } => EditType::EditText,
             EditCommand::Copy { .. } => EditType::NoOp,
             EditCommand::Change { .. } => EditType::EditText,

@@ -1,4 +1,6 @@
-use crate::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode};
+use crate::{
+    HelixMode, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
+};
 
 use {
     chrono::Local,
@@ -68,6 +70,12 @@ impl Prompt for DefaultPrompt {
                     DEFAULT_VI_NORMAL_PROMPT_INDICATOR.into()
                 }
                 PromptViMode::Insert => DEFAULT_VI_INSERT_PROMPT_INDICATOR.into(),
+            },
+            // Helix reuses the vi indicators (no distinct default glyphs yet);
+            // normal and select share the normal-mode indicator.
+            PromptEditMode::Helix(helix_mode) => match helix_mode {
+                HelixMode::Normal | HelixMode::Select => DEFAULT_VI_NORMAL_PROMPT_INDICATOR.into(),
+                HelixMode::Insert => DEFAULT_VI_INSERT_PROMPT_INDICATOR.into(),
             },
             PromptEditMode::Custom(str) => format!("({str})").into(),
         }

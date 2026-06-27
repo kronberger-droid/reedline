@@ -121,13 +121,18 @@ impl Editor {
                 self.move_head_to(head, true);
             }
             EditCommand::Select(t) => {
-                // Helix `select_*`: drop a fresh anchor at the caret, then extend
-                // the head to the target so the selection covers exactly the span
-                // just travelled — unlike `Extend`, which keeps the prior anchor.
-                let caret = self.insertion_point();
-                self.line_buffer.set_cursor(Cursor::point(caret));
-                let head = self.resolve_head(*t);
-                self.move_head_to(head, true);
+                // Helix `select_*`: re-anchor at the caret and span exactly what an
+                // operator over the same motion would act on — the gap-indexed
+                // `operator_span`, with each motion's inclusivity already baked into
+                // `op_end`. Going through `move_head_to`/`put_cursor` instead applies
+                // vi-visual's uniform inclusive widening, over-extending an exclusive
+                // motion like `w` by one grapheme (the regression: the selection bled
+                // onto the next word's first char). The operator span also keeps
+                // `w`+`d` consistent by construction.
+                let origin = self.insertion_point();
+                let span = operator_span(self.get_buffer(), origin, *t, self.caret_geometry());
+                self.line_buffer.set_cursor(span);
+                self.commit_cursor();
             }
             EditCommand::CollapseSelection(direction) => {
                 let cursor = self.line_buffer.cursor();
@@ -3754,6 +3759,41 @@ mod test {
         editor.run_edit_command(&EditCommand::Extend(word_start_fwd()));
         assert_eq!(editor.insertion_point(), 4);
         assert_eq!(editor.get_selection(), Some((0, 4))); // anchor stays at the origin
+    }
+
+    #[test]
+    fn helix_select_word_forward_is_gap_indexed() {
+        // Regression: under Block geometry (Helix normal mode), `Select(w)` must
+        // span the gap-indexed operator range "foo " — NOT vi-visual's inclusive
+        // "foo b". Routing Select through put_cursor used to widen the exclusive
+        // word-start by one grapheme, bleeding the selection onto the next word.
+        let mut editor = editor_with("foo bar baz");
+        editor.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Select(word_start_fwd()));
+        assert_eq!(editor.get_selection(), Some((0, 4))); // "foo ", not "foo b"
+        assert_eq!(editor.insertion_point(), 3); // block caret rests on the space
+
+        // The selection matches exactly what an operator over the same motion cuts,
+        // so `w` then a cut is consistent.
+        editor.run_edit_command(&EditCommand::CutChar);
+        assert_eq!(editor.get_buffer(), "bar baz");
+    }
+
+    #[test]
+    fn helix_select_word_end_is_inclusive() {
+        // The dual of the above: a forward word-*end* motion is inclusive, so
+        // `Select(e)` covers "foo" with the block caret on the last grapheme.
+        let mut editor = editor_with("foo bar");
+        editor.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Select(MotionTarget::Word {
+            kind: WordKind::Word,
+            edge: WordEdge::End,
+            direction: Direction::Forward,
+        }));
+        assert_eq!(editor.get_selection(), Some((0, 3))); // "foo"
+        assert_eq!(editor.insertion_point(), 2); // caret on the last 'o'
     }
 
     #[test]

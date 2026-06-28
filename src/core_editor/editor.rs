@@ -1,4 +1,6 @@
-use super::{edit_stack::EditStack, CaretGeometry, Clipboard, Cursor, LineBuffer, Movement};
+use super::{
+    edit_stack::EditStack, CaretGeometry, Clipboard, Cursor, LineBuffer, Movement, SelectionExtent,
+};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary};
@@ -116,10 +118,27 @@ impl Editor {
                 let head = self.resolve_head(*t);
                 self.move_head_to(head, false);
             }
-            EditCommand::Extend(t) => {
-                let head = self.resolve_head(*t);
-                self.move_head_to(head, true);
-            }
+            EditCommand::Extend(t) => match self.caret_extent() {
+                // Vi visual: sweep the block cursor over its landing grapheme.
+                SelectionExtent::CoverLanding => {
+                    let head = self.resolve_head(*t);
+                    self.move_head_to(head, true);
+                }
+                // Helix select-mode: grow the selection to the motion's gap-indexed
+                // end (`op_end`), keeping the existing anchor — so `v w` selects
+                // "foo " (caret on the space), not vi-visual's "foo b".
+                SelectionExtent::Span => {
+                    let geom = self.caret_geometry();
+                    let origin = self.insertion_point();
+                    let op_end = resolve_motion(self.get_buffer(), origin, *t, geom).op_end;
+                    let next =
+                        self.line_buffer
+                            .cursor()
+                            .extend_span(self.get_buffer(), op_end, geom);
+                    self.line_buffer.set_cursor(next);
+                    self.commit_cursor();
+                }
+            },
             EditCommand::Select(t) => {
                 // Helix `select_*`: re-anchor at the caret and span exactly what an
                 // operator over the same motion would act on — the gap-indexed
@@ -576,6 +595,12 @@ impl Editor {
         } else {
             CaretGeometry::Block
         }
+    }
+
+    /// The active mode's selection model — how `Extend` places the head (vi-visual
+    /// `CoverLanding` vs helix `Span`). Orthogonal to [`caret_geometry`](Self::caret_geometry).
+    fn caret_extent(&self) -> SelectionExtent {
+        self.edit_mode.selection_extent()
     }
 
     /// Move the cursor head to `head` — collapsing the selection unless `select`
@@ -3794,6 +3819,32 @@ mod test {
         }));
         assert_eq!(editor.get_selection(), Some((0, 3))); // "foo"
         assert_eq!(editor.insertion_point(), 2); // caret on the last 'o'
+    }
+
+    #[test]
+    fn helix_select_mode_extend_word_is_gap_indexed() {
+        // Regression: in Helix *select* mode, `Extend(w)` must grow the selection
+        // gap-indexed ("foo ", `SelectionExtent::Span`) — not borrow vi-visual's
+        // inclusive widening, which used to bleed onto the next word ("foo b").
+        let mut editor = editor_with("foo bar baz");
+        editor.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Select));
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Extend(word_start_fwd()));
+        assert_eq!(editor.get_selection(), Some((0, 4))); // "foo ", anchor kept at 0
+        assert_eq!(editor.insertion_point(), 3); // caret on the space
+    }
+
+    #[test]
+    fn vi_visual_extend_word_covers_landing() {
+        // The contrast that proves the axis is real: the *same* `Extend(w)` from
+        // the *same* position, in vi visual mode (`SelectionExtent::CoverLanding`),
+        // sweeps the landing grapheme — vim's "foo b".
+        let mut editor = editor_with("foo bar baz");
+        editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Visual));
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Extend(word_start_fwd()));
+        assert_eq!(editor.get_selection(), Some((0, 5))); // "foo b"
+        assert_eq!(editor.insertion_point(), 4); // caret on the 'b'
     }
 
     #[test]

@@ -3142,6 +3142,43 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    #[cfg(feature = "helix")]
+    fn helix_history_prefix_search_at_buffer_end() {
+        // Helix at buffer end must prefix-search history (most recent entry that
+        // starts with the typed text), like vi normal — not plain traversal.
+        // Driven one key per batch, the way real keystrokes arrive.
+        let setup = || {
+            let mut rl = seam_engine(Box::<crate::Helix>::default());
+            for cmd in ["fizz", "bar"] {
+                rl.history
+                    .save(HistoryItem::from_command_line(cmd))
+                    .unwrap();
+            }
+            rl
+        };
+        // insert mode, up arrow:
+        let mut rl = setup();
+        for k in [ch('f'), ch('i'), key(KeyCode::Up)] {
+            drive(&mut rl, &[k]);
+        }
+        assert_eq!(
+            rl.current_buffer_contents(),
+            "fizz",
+            "insert up-arrow prefix search"
+        );
+        // normal mode, `k`:
+        let mut rl = setup();
+        for k in [ch('f'), ch('i'), key(KeyCode::Esc), ch('k')] {
+            drive(&mut rl, &[k]);
+        }
+        assert_eq!(
+            rl.current_buffer_contents(),
+            "fizz",
+            "normal-mode `k` prefix search"
+        );
+    }
+
     fn vi_visual_selection_blocks_hint_completion() {
         // A hint completing over a selection would run through `delete_selection`
         // and clobber it — the empty-cursor guard must suppress it.

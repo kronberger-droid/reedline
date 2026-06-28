@@ -64,6 +64,33 @@ impl CaretGeometry {
     }
 }
 
+pub(crate) enum SelectionExtent {
+    /// Vi visual: the block cursor sweeps the grapheme it lands *on*, so head
+    /// covers the motion target: `vw` over `"foo bar"` selects `"foo b"`.
+    CoverLanding,
+    /// Helix: the selection is the gap-indexed operator span (`op_end`), so the
+    /// head stops at the motion boundary: `w` selects `"foo "`, caret on the
+    /// space.
+    Span,
+}
+
+/// Keep the anchor's grapheme covered when a block selection reverses direction
+/// across it (Helix `Range::put_cursor`): the anchor hops to the far edge of it
+/// grapheme so it stays inside the range. A bar (exclusive) selection is half-open
+/// `[min, max)`, so its anchor never moves.
+fn flip_anchor(buf: &str, anchor: usize, old_head: usize, new_head: usize, block: bool) -> usize {
+    if !block {
+        anchor
+    } else if old_head >= anchor && new_head < anchor {
+        // The
+        next_grapheme_boundary(buf, anchor)
+    } else if old_head < anchor && new_head >= anchor {
+        prev_grapheme_boundary(buf, anchor)
+    } else {
+        anchor
+    }
+}
+
 /// A cursor as a (possibly empty) range over a buffer.
 ///
 /// Uses gap indexing — `anchor` and `head` represent positions *between* bytes,
@@ -236,20 +263,12 @@ impl Cursor {
         }
         let inclusive = geometry.is_inclusive();
 
-        // Flip the anchor onto the far edge of its grapheme when the direction
+        // Flip the anchor onto the far edge of its grapheme when direction
         // changes, so the grapheme the selection started on stays covered (Helix
         // `Range::put_cursor`). This is *inclusive* (block) behavior; an exclusive
         // (Between / emacs) selection is half-open `[min, max)`, so its anchor
-        // never moves on reversal.
-        let anchor: usize = if !inclusive {
-            self.anchor
-        } else if self.head >= self.anchor && target < self.anchor {
-            next_grapheme_boundary(buf, self.anchor)
-        } else if self.head < self.anchor && target >= self.anchor {
-            prev_grapheme_boundary(buf, self.anchor)
-        } else {
-            self.anchor
-        };
+        // never moves on reversal
+        let anchor = flip_anchor(buf, self.anchor, self.head, target, inclusive);
 
         // Place the head so `caret()` lands back on `target`'s grapheme: forward
         // *and inclusive* → head on the far edge; otherwise → head *is* `target`.

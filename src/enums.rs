@@ -183,6 +183,11 @@ pub enum MotionTarget {
     },
     /// Logical line edge: `Backward` = line start (`0`), `Forward` = line end (`$`).
     LineEdge(Direction),
+    /// End of the current line **including** its terminator: the start of the next
+    /// line, or the buffer end on the last line. Unlike [`LineEdge(Forward)`](Self::LineEdge)
+    /// (`$`), which stops *before* the `\n`, a selection to `Eol` covers the `\n`
+    /// — so Helix's `x` (then a cut) removes the line and joins with the next.
+    Eol,
     /// Whole-buffer edge: `Backward` = start (`gg`), `Forward` = end (`G`).
     BufferEdge(Direction),
     /// The adjacent logical line: `Forward` = line below (`j`), `Backward` =

@@ -261,13 +261,14 @@ impl Helix {
             }),
             'g' => self.set_pending(Pending::Goto),
             'r' => self.set_pending(Pending::Replace),
-            // Select the current line: jump to its start, then select through
-            // its end.
+            // Select the whole current line, *including* its `\n` (Helix `x`): jump
+            // to its start, then select through the terminator (`Eol`), so a
+            // following `d` removes the line and joins with the next.
             'x' => {
                 self.count = None;
                 ReedlineEvent::Edit(vec![
                     EditCommand::Move(MotionTarget::LineEdge(Direction::Backward)),
-                    EditCommand::Select(MotionTarget::LineEdge(Direction::Forward)),
+                    EditCommand::Select(MotionTarget::Eol),
                 ])
             }
             // Collapse the selection onto the cursor; the engine's `Esc`
@@ -672,7 +673,7 @@ mod test {
             helix.parse_event(chr('x')),
             ReedlineEvent::Edit(vec![
                 EditCommand::Move(MotionTarget::LineEdge(Direction::Backward)),
-                EditCommand::Select(MotionTarget::LineEdge(Direction::Forward)),
+                EditCommand::Select(MotionTarget::Eol),
             ])
         );
     }

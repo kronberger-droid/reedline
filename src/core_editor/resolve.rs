@@ -213,6 +213,13 @@ pub(crate) fn resolve_motion(
         // CRLF-aware via `end_of_line`: `$` stops before the `\r` of a `\r\n`
         // terminator, matching `LineBuffer::find_current_line_end`.
         MotionTarget::LineEdge(Direction::Forward) => span(line::end_of_line(buf, origin), false),
+        // End of line *through* the terminator: start of the next line, or buffer
+        // end on the last line. Exclusive — a selection `[origin, eol)` covers the
+        // `\n` itself (Helix `x`).
+        MotionTarget::Eol => span(
+            line::start_of_next_line(buf, origin).unwrap_or(buf.len()),
+            false,
+        ),
         // The adjacent line (`j`/`k`). Lands on the *start* of the line below /
         // above; on the first/last line it stays put (so `dj`/`dk` there only
         // affect the current line). Operators snap the span to whole lines.

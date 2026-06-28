@@ -4,7 +4,9 @@ use super::{
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary};
-use crate::core_editor::{commit, line, operator_span, resolve_motion, RestPolicy};
+use crate::core_editor::{
+    commit, line, operator_span, resolve_motion, resolve_selection, RestPolicy,
+};
 use crate::enums::{EditType, TextObject, TextObjectScope, TextObjectType, UndoBehavior};
 use crate::prompt::PromptEditMode;
 use crate::{core_editor::get_local_clipboard, EditCommand};
@@ -125,30 +127,32 @@ impl Editor {
                     self.move_head_to(head, true);
                 }
                 // The gap-indexed model (helix; bar modes too): grow the selection
-                // to the motion's `op_end`, keeping the anchor — no vi-visual
-                // widening. So helix select-mode `v w` selects "foo " not "foo b".
-                // Inclusive motions coincide with `CoverLanding`.
+                // to the motion's gap-indexed end, keeping the anchor — no vi-visual
+                // widening. `resolve_selection` supplies the *hopped* endpoint, so a
+                // chained `v w` advances ("foo " → "foo bar ") instead of sticking
+                // on the space; for a fresh motion it equals `op_end`.
                 SelectionExtent::Span => {
                     let geom = self.caret_geometry();
                     let origin = self.insertion_point();
-                    let op_end = resolve_motion(self.get_buffer(), origin, *t, geom).op_end;
-                    let next =
-                        self.line_buffer
-                            .cursor()
-                            .extend_span(self.get_buffer(), op_end, geom);
+                    let head = resolve_selection(self.get_buffer(), origin, *t, geom).head();
+                    let next = self
+                        .line_buffer
+                        .cursor()
+                        .extend_span(self.get_buffer(), head, geom);
                     self.line_buffer.set_cursor(next);
                     self.commit_cursor();
                 }
             },
             EditCommand::Select(t) => {
-                // Helix `select_*` (fresh, re-anchoring): the selection is exactly
-                // what an operator over the same motion would act on — the
-                // gap-indexed `operator_span` (`Span`), so `w`+`d` stays consistent
-                // (C3). It must NOT flip the anchor like `extend_span`, else a fresh
-                // backward `b` would cover one grapheme more than `db`.
+                // Helix `select_*` (fresh, re-anchoring): `resolve_selection` builds
+                // the gap-indexed range covering what the motion traverses, with the
+                // *hop* rule so chained motions don't stick on the boundary the
+                // previous one parked on (`w` advancing past the space, `e` not
+                // re-covering the cursor grapheme). For a fresh motion it equals the
+                // operator span, so `w`+`d` stays consistent (C3).
                 let origin = self.insertion_point();
-                let span = operator_span(self.get_buffer(), origin, *t, self.caret_geometry());
-                self.line_buffer.set_cursor(span);
+                let sel = resolve_selection(self.get_buffer(), origin, *t, self.caret_geometry());
+                self.line_buffer.set_cursor(sel);
                 self.commit_cursor();
             }
             EditCommand::CollapseSelection(direction) => {
@@ -4540,5 +4544,58 @@ mod test {
                 select: false,
             },
         );
+    }
+    #[test]
+    fn helix_select_word_forward_chains_without_sticking() {
+        // Regression: chained `w` must advance word-by-word, not stick on the
+        // space the previous `w` parked the caret on.
+        let mut ed = editor_with("foo bar baz");
+        ed.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        ed.move_to_position(0, false);
+        ed.commit_cursor();
+        let w = word_start_fwd();
+        ed.run_edit_command(&EditCommand::Select(w));
+        assert_eq!(ed.get_selection(), Some((0, 4))); // "foo "
+        ed.run_edit_command(&EditCommand::Select(w));
+        assert_eq!(ed.get_selection(), Some((4, 8))); // "bar " — not stuck on (3,4)
+        ed.run_edit_command(&EditCommand::Select(w));
+        assert_eq!(ed.get_selection(), Some((8, 11))); // "baz"
+    }
+
+    #[test]
+    fn helix_select_word_end_chains_without_dragging() {
+        // Regression: chained `e` must not re-cover the grapheme it parked on
+        // ("o bar"); each `e` selects the whitespace + next word, ending on its
+        // last grapheme.
+        let mut ed = editor_with("foo bar baz");
+        ed.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        ed.move_to_position(0, false);
+        ed.commit_cursor();
+        let e = MotionTarget::Word {
+            kind: WordKind::Word,
+            edge: WordEdge::End,
+            direction: Direction::Forward,
+        };
+        ed.run_edit_command(&EditCommand::Select(e));
+        assert_eq!(ed.get_selection(), Some((0, 3))); // "foo"
+        ed.run_edit_command(&EditCommand::Select(e));
+        assert_eq!(ed.get_selection(), Some((3, 7))); // " bar" — not "o bar"
+        ed.run_edit_command(&EditCommand::Select(e));
+        assert_eq!(ed.get_selection(), Some((7, 11))); // " baz"
+    }
+
+    #[test]
+    fn helix_select_mode_word_forward_grows_from_fixed_anchor() {
+        // Select mode keeps the anchor; chained `w` grows the selection word by
+        // word instead of sticking.
+        let mut ed = editor_with("foo bar baz");
+        ed.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Select));
+        ed.move_to_position(0, false);
+        ed.commit_cursor();
+        let w = word_start_fwd();
+        ed.run_edit_command(&EditCommand::Extend(w));
+        assert_eq!(ed.get_selection(), Some((0, 4))); // "foo "
+        ed.run_edit_command(&EditCommand::Extend(w));
+        assert_eq!(ed.get_selection(), Some((0, 8))); // "foo bar "
     }
 }

@@ -3,7 +3,7 @@ use crate::{
         graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
         line, word, CaretGeometry, Cursor,
     },
-    enums::{Direction, MotionTarget, WordEdge},
+    enums::{Direction, MotionTarget, WordEdge, WordKind},
     FindStop,
 };
 
@@ -31,6 +31,118 @@ pub(crate) fn operator_span(
     geometry: CaretGeometry,
 ) -> Cursor {
     Cursor::new(origin, resolve_motion(buf, origin, target, geometry).op_end)
+}
+
+/// Resolve a Helix-style **selection** for a re-anchoring motion (`Select`): the
+/// gap-indexed range covering what the motion traverses, with the cursor on the
+/// head end.
+///
+/// Differs from [`operator_span`] only by the *hop* rule, which is what keeps
+/// chained word motions correct once a previous motion has parked the caret on a
+/// boundary:
+/// - **Forward word-start on a boundary** (`w` pressed where the last `w` left
+///   the caret — e.g. the space before the next word): re-anchor one grapheme
+///   past it and resolve from there, so `w` selects the *next* span ("bar ")
+///   instead of collapsing onto the space and sticking.
+/// - **Forward word-end on a word's last grapheme** (`e` pressed where the last
+///   `e` parked): the motion already reaches the next word's end; only the anchor
+///   excludes the origin grapheme, so `e` selects " bar" rather than "o bar".
+/// - **Backward** mirrors this: the origin grapheme is covered unless the cursor
+///   already sits on the boundary the motion seeks.
+///
+/// Non-word targets (`Find`, line/buffer edges) fall through to the plain span,
+/// identical to [`operator_span`].
+pub(crate) fn resolve_selection(
+    buf: &str,
+    origin: usize,
+    target: MotionTarget,
+    geometry: CaretGeometry,
+) -> Cursor {
+    let m = resolve_motion(buf, origin, target, geometry);
+    if m.head == origin {
+        return Cursor::point(origin);
+    }
+
+    if m.head < origin {
+        // Backward: cover the origin grapheme (anchor one past it), unless the
+        // boundary the motion seeks sits immediately before it — `b` on a word's
+        // first grapheme selects only what lies behind the word.
+        let anchor = if word_boundary_at_origin(buf, origin, target, Direction::Backward) {
+            origin
+        } else {
+            next_grapheme_boundary(buf, origin)
+        };
+        return Cursor::new(anchor, m.head);
+    }
+
+    // Forward.
+    let next = next_grapheme_boundary(buf, origin);
+    let on_boundary = word_boundary_at_origin(buf, origin, target, Direction::Forward);
+    let (anchor, movement) = match target {
+        // A forward word-start sitting on a boundary: the anchor hops onto the
+        // next grapheme and the span runs to the *following* word start.
+        MotionTarget::Word {
+            edge: WordEdge::Start,
+            ..
+        } if on_boundary => (next, resolve_motion(buf, next, target, geometry)),
+        // A forward word-end on a word's last grapheme already resolves to the
+        // next word's end; only the anchor excludes the origin grapheme.
+        MotionTarget::Word {
+            edge: WordEdge::End,
+            ..
+        } if on_boundary => (next, m),
+        _ => (origin, m),
+    };
+    Cursor::new(anchor, movement.op_end.max(anchor))
+}
+
+/// `true` when the caret at `origin` sits exactly on the word boundary that
+/// `target` seeks in `direction` — i.e. where a previous identical motion would
+/// have parked it. Drives the re-anchor *hop* in [`resolve_selection`].
+fn word_boundary_at_origin(
+    buf: &str,
+    origin: usize,
+    target: MotionTarget,
+    direction: Direction,
+) -> bool {
+    let MotionTarget::Word { kind, edge, .. } = target else {
+        return false;
+    };
+    // `a` is the grapheme under the cursor, `b` its neighbor in travel direction;
+    // both reduced to their first scalar, like the classifier scans in `word`.
+    let Some(a) = buf[origin..].chars().next() else {
+        return false;
+    };
+    let b = match direction {
+        Direction::Forward => buf[next_grapheme_boundary(buf, origin)..].chars().next(),
+        Direction::Backward => buf[prev_grapheme_boundary(buf, origin)..].chars().next(),
+    };
+    let Some(b) = b else {
+        return false;
+    };
+    let is_boundary = match kind {
+        WordKind::Word => word::is_word_boundary(a, b),
+        WordKind::LongWord => word::is_long_word_boundary(a, b),
+        // Unicode (emacs) words don't drive Helix select motions.
+        WordKind::Unicode => return false,
+    };
+    // Mirrors Helix's `reached_target`: a *start* must land on a word grapheme;
+    // an *end* must leave one.
+    let class_ok = match (edge, direction) {
+        (WordEdge::Start, Direction::Forward) => matches!(
+            word::categorize_char(b),
+            word::CharClass::Word | word::CharClass::Punctuation
+        ),
+        (WordEdge::End, Direction::Forward) | (WordEdge::Start, Direction::Backward) => matches!(
+            word::categorize_char(a),
+            word::CharClass::Word | word::CharClass::Punctuation
+        ),
+        (WordEdge::End, Direction::Backward) => matches!(
+            word::categorize_char(b),
+            word::CharClass::Word | word::CharClass::Punctuation
+        ),
+    };
+    is_boundary && class_ok
 }
 
 /// Resolve a public [`MotionTarget`] against `buf`, relative to `origin`.

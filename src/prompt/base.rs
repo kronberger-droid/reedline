@@ -84,6 +84,21 @@ impl PromptEditMode {
         }
     }
 
+    /// Whether a non-empty cursor in this mode is an *intentional selection*
+    /// rather than the resting caret.
+    ///
+    /// Needed because a block mode rests one grapheme wide, so cursor shape alone
+    /// can't tell vi-visual's `v`-started selection (which must be protected — a
+    /// history hint must not clobber it) from helix-normal's resting block (a
+    /// plain caret that should behave like vi-normal's). The visual/select modes
+    /// answer `true`; the caret modes (normal/insert/emacs) `false`.
+    pub(crate) fn is_selection_mode(&self) -> bool {
+        matches!(
+            self,
+            PromptEditMode::Vi(PromptViMode::Visual) | PromptEditMode::Helix(HelixMode::Select)
+        )
+    }
+
     /// How a *selecting* motion places its head in this mode (the selection-model
     /// axis, orthogonal to [`rest_policy`](Self::rest_policy)).
     pub(crate) fn selection_extent(&self) -> SelectionExtent {

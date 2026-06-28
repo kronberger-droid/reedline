@@ -4621,6 +4621,34 @@ mod test {
         assert_eq!(ed.get_selection(), Some((0, 8))); // "foo bar "
     }
     #[test]
+    fn helix_eol_target_selects_through_the_terminator() {
+        // `x` = Move(LineStart) + Select(Eol): the selection covers the trailing
+        // `\n`, so a following cut joins the lines.
+        let x = |ed: &mut Editor| {
+            ed.run_edit_command(&EditCommand::Move(MotionTarget::LineEdge(
+                Direction::Backward,
+            )));
+            ed.run_edit_command(&EditCommand::Select(MotionTarget::Eol));
+        };
+        let mut ed = editor_with("ab\ncd");
+        ed.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        ed.move_to_position(0, false);
+        ed.commit_cursor();
+        x(&mut ed);
+        assert_eq!(ed.get_selection(), Some((0, 3))); // "ab\n"
+        ed.run_edit_command(&EditCommand::CutChar); // helix `d`
+        assert_eq!(ed.get_buffer(), "cd");
+
+        // last line: no `\n`, select through to the buffer end.
+        let mut ed = editor_with("ab\ncd");
+        ed.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        ed.move_to_position(4, false); // on 'd'
+        ed.commit_cursor();
+        x(&mut ed);
+        assert_eq!(ed.get_selection(), Some((3, 5))); // "cd"
+    }
+
+    #[test]
     fn helix_select_mode_grapheme_extends() {
         // Regression: select-mode `l`/`h` must move the head and grow/shrink the
         // selection. It was stuck because the motion resolved from the caret (one

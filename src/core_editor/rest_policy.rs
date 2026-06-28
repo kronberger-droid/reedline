@@ -27,7 +27,30 @@ pub(crate) enum RestPolicy {
     /// none — onto the grapheme to its left. Mirrors Helix's `Range::min_width_1`.
     /// The policy for Vi visual mode, whose selection is always at least the
     /// grapheme it sits on.
+    ///
+    /// The line terminator is *not* a coverable cell here: a point at the end of
+    /// an interior line widens backward onto the line's last grapheme, never
+    /// forward onto the `\n` — matching vim, whose visual cursor never sits on the
+    /// newline.
     Block,
+    /// Like [`Block`](Self::Block), but the line terminator **is** a coverable
+    /// cell: a point sitting at the end of an interior line widens *forward* onto
+    /// the `\n` (or `\r\n`) so the block rests on the newline itself, the way
+    /// Helix's block cursor can. At the true buffer end (no terminator to the
+    /// right) it still widens backward onto the last grapheme, exactly like
+    /// `Block`. The policy for Helix normal and select modes.
+    BlockEol,
+}
+
+impl RestPolicy {
+    /// Whether this policy lets the block cursor *rest on* the line terminator
+    /// (treating `\n`/`\r\n` as an ordinary one-grapheme cell) rather than
+    /// skipping past it. Only [`BlockEol`](Self::BlockEol) does — the movement
+    /// layer reads this to decide whether a grapheme step may land on the
+    /// newline.
+    pub(crate) fn rests_on_line_terminator(self) -> bool {
+        matches!(self, RestPolicy::BlockEol)
+    }
 }
 
 /// Make a cursor *coherent* for `buf`: clamp both ends into `[0, buf.len()]` and
@@ -92,28 +115,39 @@ pub(crate) fn commit(buf: &str, c: Cursor, policy: RestPolicy) -> Cursor {
                 c
             }
         }
-        RestPolicy::Block => {
-            // A block cursor always covers exactly one grapheme. Only a resting
-            // *point* needs adjusting; an existing selection is already a range.
-            if c.is_empty() {
-                let head = c.head();
-                let next = next_grapheme_boundary(buf, head);
-                if next > head && !buf[head..].starts_with(['\n', '\r']) {
-                    // widen forward onto the grapheme to the right: [head, next)
-                    c.move_head(next)
-                } else if head > 0 && !buf[..head].ends_with(['\n', '\r']) {
-                    // at the buffer end there's nothing to the right, so cover the
-                    // last grapheme instead: [prev, head)
-                    Cursor::new(prev_grapheme_boundary(buf, head), head)
-                } else {
-                    // empty buffer, or an empty line (no grapheme to cover without
-                    // crossing the newline): stay a zero-width point
-                    c
-                }
-            } else {
-                c
-            }
-        }
+        // `Block` treats the line terminator as a wall (widen backward off it);
+        // `BlockEol` treats it as a coverable cell (widen forward onto it). Only a
+        // resting *point* needs adjusting — an existing selection is already a range.
+        RestPolicy::Block => widen_block(buf, c, false),
+        RestPolicy::BlockEol => widen_block(buf, c, true),
+    }
+}
+
+/// Widen a resting *point* into a one-grapheme block; an existing range is left
+/// untouched. `cover_terminator` decides the behavior at the end of an interior
+/// line: when `true` the block widens *forward* onto the `\n`/`\r\n` (Helix —
+/// the newline is a cell); when `false` it widens *backward* onto the line's last
+/// grapheme (Vi visual — the newline is a wall). At the true buffer end both
+/// widen backward, since there is no grapheme to the right.
+fn widen_block(buf: &str, c: Cursor, cover_terminator: bool) -> Cursor {
+    if !c.is_empty() {
+        return c;
+    }
+    let head = c.head();
+    let next = next_grapheme_boundary(buf, head);
+    let on_terminator = buf[head..].starts_with(['\n', '\r']);
+    if next > head && (cover_terminator || !on_terminator) {
+        // widen forward onto the grapheme to the right (the `\n` too, for
+        // `BlockEol`): [head, next)
+        c.move_head(next)
+    } else if head > 0 && !buf[..head].ends_with(['\n', '\r']) {
+        // nothing coverable to the right (buffer end, or a wall under `Block`), so
+        // cover the last grapheme of the line instead: [prev, head)
+        Cursor::new(prev_grapheme_boundary(buf, head), head)
+    } else {
+        // empty buffer, or an empty line whose only cell is the terminator we
+        // refuse to cover (`Block`): stay a zero-width point
+        c
     }
 }
 
@@ -338,6 +372,64 @@ mod tests {
         );
     }
 
+    // --- commit: BlockEol ----------------------------------------------------
+
+    #[test]
+    fn block_eol_rests_on_interior_newline() {
+        // The Helix block: a point at the end of an interior line widens *forward*
+        // onto the `\n` (the cell `Block` would refuse). "ab\ncd": point(2) → [2,3).
+        assert_eq!(
+            commit("ab\ncd", Cursor::point(2), RestPolicy::BlockEol),
+            Cursor::new(2, 3)
+        );
+    }
+
+    #[test]
+    fn block_eol_rests_on_crlf_terminator() {
+        // Widens forward over the whole `\r\n` grapheme. "ab\r\ncd": point(2) → [2,4).
+        assert_eq!(
+            commit("ab\r\ncd", Cursor::point(2), RestPolicy::BlockEol),
+            Cursor::new(2, 4)
+        );
+    }
+
+    #[test]
+    fn block_eol_covers_empty_interior_line() {
+        // An empty interior line's only cell *is* the terminator; `BlockEol` covers
+        // it rather than staying a point. "ab\n\ncd": point(3) → [3,4) on the 2nd `\n`.
+        assert_eq!(
+            commit("ab\n\ncd", Cursor::point(3), RestPolicy::BlockEol),
+            Cursor::new(3, 4)
+        );
+    }
+
+    #[test]
+    fn block_eol_widens_backward_at_buffer_end() {
+        // No terminator (nor any grapheme) to the right at the true end, so it
+        // behaves like `Block`: point(5) → [4,5) on the last 'o'.
+        assert_eq!(
+            commit("hello", Cursor::point(5), RestPolicy::BlockEol),
+            Cursor::new(4, 5)
+        );
+    }
+
+    #[test]
+    fn block_eol_widens_forward_midline_like_block() {
+        // Away from any terminator it is identical to `Block`: point(2) → [2,3).
+        assert_eq!(
+            commit("hello", Cursor::point(2), RestPolicy::BlockEol),
+            Cursor::new(2, 3)
+        );
+    }
+
+    #[test]
+    fn block_eol_leaves_existing_selection() {
+        assert_eq!(
+            commit("ab\ncd", Cursor::new(0, 3), RestPolicy::BlockEol),
+            Cursor::new(0, 3)
+        );
+    }
+
     // --- commit: idempotency across every policy and char boundary -----------
 
     #[test]
@@ -346,6 +438,7 @@ mod tests {
             RestPolicy::Between,
             RestPolicy::OnGrapheme,
             RestPolicy::Block,
+            RestPolicy::BlockEol,
         ] {
             for a in (0..=MIXED.len()).filter(|&i| MIXED.is_char_boundary(i)) {
                 for h in (0..=MIXED.len()).filter(|&i| MIXED.is_char_boundary(i)) {

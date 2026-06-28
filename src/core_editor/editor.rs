@@ -566,6 +566,14 @@ impl Editor {
                 Direction::Forward => head.min(line::end_of_line(buf, origin)),
             };
         }
+        // A block that rests on the terminator (Helix) treats `\n` as an ordinary
+        // cell: every grapheme step lands exactly one grapheme away, newline
+        // included, and the *next* step leaves it for free (the caret of a block
+        // resting on the `\n` is the `\n` byte itself). So no skip is needed — the
+        // raw one-grapheme landing is already correct.
+        if self.edit_mode.rest_policy().rests_on_line_terminator() {
+            return head;
+        }
         // Cross the terminator so the caret lands on a real cell, not the `\n`.
         // Forward: skip onto the next line's first grapheme. Backward: step once
         // more onto the previous line's last grapheme — unless that line is *also*
@@ -2966,6 +2974,55 @@ mod test {
         // Not at the end: a min-width-1 block on the first grapheme.
         editor.run_edit_command(&EditCommand::MoveToLineStart { select: false });
         assert!(!editor.is_cursor_at_buffer_end());
+    }
+
+    #[test]
+    fn helix_block_rests_on_newline_at_line_end() {
+        // `$` in helix lands the block *on* the `\n` (the `BlockEol` policy),
+        // unlike vi visual which would pull back onto the line's last grapheme.
+        let mut editor = editor_with("ab\ncd");
+        editor.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::MoveToLineEnd { select: false });
+        let c = editor.line_buffer.cursor();
+        assert_eq!((c.anchor(), c.head()), (2, 3), "block should cover the \\n");
+        assert_eq!(editor.insertion_point(), 2);
+    }
+
+    #[test]
+    fn helix_grapheme_step_lands_on_then_crosses_newline() {
+        // Walking `l` from the line start treats the `\n` as an ordinary cell:
+        // 'a' → 'b' → `\n` → 'c'. The block rests on the newline for one step,
+        // then leaves it for free on the next.
+        let mut editor = editor_with("ab\ncd");
+        editor.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Normal));
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::MoveToLineStart { select: false });
+        let steps = [(0, 1), (1, 2), (2, 3), (3, 4)];
+        for (i, &(anchor, head)) in steps.iter().enumerate() {
+            let c = editor.line_buffer.cursor();
+            assert_eq!((c.anchor(), c.head()), (anchor, head), "before step {i}");
+            editor.run_edit_command(&EditCommand::MoveRight { select: false });
+        }
+        // landed on 'c' of the next line
+        let c = editor.line_buffer.cursor();
+        assert_eq!((c.anchor(), c.head()), (4, 5));
+    }
+
+    #[test]
+    fn vi_visual_block_does_not_rest_on_newline() {
+        // Contrast: vi visual keeps `Block` — `$` pulls back onto 'b', never the
+        // `\n`. Pins that the new policy is helix-only.
+        let mut editor = editor_with("ab\ncd");
+        editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Visual));
+        editor.line_buffer.set_insertion_point(0);
+        editor.run_edit_command(&EditCommand::MoveToLineEnd { select: false });
+        let c = editor.line_buffer.cursor();
+        assert_eq!(
+            (c.anchor(), c.head()),
+            (1, 2),
+            "block covers 'b', not the \\n"
+        );
     }
 
     #[test]

@@ -70,8 +70,10 @@ impl PromptEditMode {
             // Visual selections are min-width-1: the cursor always covers at
             // least the grapheme it sits on, so an empty point widens to a block.
             PromptEditMode::Vi(PromptViMode::Visual) => RestPolicy::Block,
-            // Helix normal and select both rest a one-grapheme block cursor.
-            PromptEditMode::Helix(HelixMode::Normal | HelixMode::Select) => RestPolicy::Block,
+            // Helix normal and select both rest a one-grapheme block cursor that,
+            // unlike vi visual's, may sit *on* the line terminator — so `$`/`l` at
+            // end-of-line cover the `\n` rather than the last real grapheme.
+            PromptEditMode::Helix(HelixMode::Normal | HelixMode::Select) => RestPolicy::BlockEol,
             PromptEditMode::Vi(PromptViMode::Insert)
             | PromptEditMode::Helix(HelixMode::Insert)
             | PromptEditMode::Default

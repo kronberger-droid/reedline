@@ -64,6 +64,44 @@ impl CaretGeometry {
     }
 }
 
+/// How a *selecting* motion places its head — the selection-model axis.
+///
+/// Both models resolve the same motion; they differ only in where the head lands
+/// for an **exclusive** motion (e.g. `w`). Inclusive motions (`e`, `f`) coincide,
+/// so this only ever changes word-start / grapheme / edge selections.
+///
+/// This is the axis that distinguishes vi visual from helix even though they
+/// share rest policy and geometry — see the design notes. It is consulted only
+/// when growing a selection (`Extend`); `Move` collapses and a fresh `Select`
+/// is, by definition, the operator span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionExtent {
+    /// Vi visual: the block cursor sweeps the grapheme it lands *on*, so the head
+    /// covers the motion target — `vw` over `"foo bar"` selects `"foo b"`.
+    CoverLanding,
+    /// Helix: the selection is the gap-indexed operator span (`op_end`), so the
+    /// head stops at the motion boundary — `w` selects `"foo "`, caret on the
+    /// space. Equals what an operator over the same motion acts on (the C3 law).
+    Span,
+}
+
+/// Keep the anchor's grapheme covered when a block selection reverses direction
+/// across it (Helix `Range::put_cursor`): the anchor hops to the far edge of its
+/// grapheme so it stays inside the range. A bar (exclusive) selection is half-open
+/// `[min, max)`, so its anchor never moves. Shared by [`Cursor::put_cursor`] and
+/// [`Cursor::extend_span`] so both selection models flip identically.
+fn flip_anchor(buf: &str, anchor: usize, old_head: usize, new_head: usize, block: bool) -> usize {
+    if !block {
+        anchor
+    } else if old_head >= anchor && new_head < anchor {
+        next_grapheme_boundary(buf, anchor)
+    } else if old_head < anchor && new_head >= anchor {
+        prev_grapheme_boundary(buf, anchor)
+    } else {
+        anchor
+    }
+}
+
 /// A cursor as a (possibly empty) range over a buffer.
 ///
 /// Uses gap indexing — `anchor` and `head` represent positions *between* bytes,
@@ -237,22 +275,12 @@ impl Cursor {
         let inclusive = geometry.is_inclusive();
 
         // Flip the anchor onto the far edge of its grapheme when the direction
-        // changes, so the grapheme the selection started on stays covered (Helix
-        // `Range::put_cursor`). This is *inclusive* (block) behavior; an exclusive
-        // (Between / emacs) selection is half-open `[min, max)`, so its anchor
-        // never moves on reversal.
-        let anchor: usize = if !inclusive {
-            self.anchor
-        } else if self.head >= self.anchor && target < self.anchor {
-            next_grapheme_boundary(buf, self.anchor)
-        } else if self.head < self.anchor && target >= self.anchor {
-            prev_grapheme_boundary(buf, self.anchor)
-        } else {
-            self.anchor
-        };
+        // changes, so the grapheme the selection started on stays covered.
+        let anchor = flip_anchor(buf, self.anchor, self.head, target, inclusive);
 
         // Place the head so `caret()` lands back on `target`'s grapheme: forward
         // *and inclusive* → head on the far edge; otherwise → head *is* `target`.
+        // This forward widening is the `CoverLanding` selection model.
         let head = if anchor <= target && inclusive {
             next_grapheme_boundary(buf, target)
         } else {
@@ -260,6 +288,20 @@ impl Cursor {
         };
 
         Self::new(anchor, head)
+    }
+
+    /// Grow a selection under the [`SelectionExtent::Span`] model: place the head
+    /// at the motion's gap-indexed end (`op_end`, with per-motion inclusivity
+    /// already baked in by [`resolve_motion`](super::resolve_motion)) — **no**
+    /// vi-visual widening — while keeping the anchor grapheme covered through a
+    /// block reversal via the same [`flip_anchor`] as [`Cursor::put_cursor`].
+    ///
+    /// This is the helix counterpart of `put_cursor(.., Movement::Extend, ..)`:
+    /// the head stops at the boundary (`w` → `"foo "`) instead of sweeping the
+    /// landing grapheme (`w` → `"foo b"`). For inclusive motions the two coincide.
+    pub(crate) fn extend_span(self, buf: &str, op_end: usize, geometry: CaretGeometry) -> Self {
+        let anchor = flip_anchor(buf, self.anchor, self.head, op_end, geometry.is_inclusive());
+        Self::new(anchor, op_end)
     }
 }
 

@@ -1,4 +1,6 @@
-use super::{edit_stack::EditStack, CaretGeometry, Clipboard, Cursor, LineBuffer, Movement};
+use super::{
+    edit_stack::EditStack, CaretGeometry, Clipboard, Cursor, LineBuffer, Movement, SelectionExtent,
+};
 #[cfg(feature = "system_clipboard")]
 use crate::core_editor::get_system_clipboard;
 use crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary};
@@ -116,10 +118,27 @@ impl Editor {
                 let head = self.resolve_head(*t);
                 self.move_head_to(head, false);
             }
-            EditCommand::Extend(t) => {
-                let head = self.resolve_head(*t);
-                self.move_head_to(head, true);
-            }
+            EditCommand::Extend(t) => match self.caret_extent() {
+                // Vi visual: sweep the block cursor over its landing grapheme.
+                SelectionExtent::CoverLanding => {
+                    let head = self.resolve_head(*t);
+                    self.move_head_to(head, true);
+                }
+                // The gap-indexed model (helix; bar modes too): grow the selection
+                // to the motion's `op_end`, keeping the anchor — no vi-visual
+                // widening. Inclusive motions coincide with `CoverLanding`.
+                SelectionExtent::Span => {
+                    let geom = self.caret_geometry();
+                    let origin = self.insertion_point();
+                    let op_end = resolve_motion(self.get_buffer(), origin, *t, geom).op_end;
+                    let next =
+                        self.line_buffer
+                            .cursor()
+                            .extend_span(self.get_buffer(), op_end, geom);
+                    self.line_buffer.set_cursor(next);
+                    self.commit_cursor();
+                }
+            },
             EditCommand::Select(t) => {
                 // Helix `select_*`: re-anchor at the caret and span exactly what an
                 // operator over the same motion would act on — the gap-indexed
@@ -576,6 +595,12 @@ impl Editor {
         } else {
             CaretGeometry::Block
         }
+    }
+
+    /// The active mode's selection model — how `Extend` places the head (vi-visual
+    /// `CoverLanding` vs helix `Span`). Orthogonal to [`caret_geometry`](Self::caret_geometry).
+    fn caret_extent(&self) -> SelectionExtent {
+        self.edit_mode.selection_extent()
     }
 
     /// Move the cursor head to `head` — collapsing the selection unless `select`
@@ -3794,6 +3819,30 @@ mod test {
         }));
         assert_eq!(editor.get_selection(), Some((0, 3))); // "foo"
         assert_eq!(editor.insertion_point(), 2); // caret on the last 'o'
+    }
+
+    #[test]
+    fn vi_visual_extend_word_covers_landing() {
+        // `CoverLanding`: vi visual sweeps the grapheme the motion lands *on*, so
+        // `Extend(w)` over "foo bar" selects "foo b" (vim's inclusive visual).
+        let mut editor = editor_with("foo bar baz");
+        editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Visual));
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Extend(word_start_fwd()));
+        assert_eq!(editor.get_selection(), Some((0, 5))); // "foo b"
+        assert_eq!(editor.insertion_point(), 4); // caret on the 'b'
+    }
+
+    #[test]
+    fn emacs_extend_word_is_exclusive_span() {
+        // The contrast that proves the axis is real: the *same* `Extend(w)` from
+        // the *same* position in a `Span` (bar) mode stops at the boundary — "foo "
+        // — instead of sweeping the landing grapheme.
+        let mut editor = editor_with("foo bar baz");
+        editor.set_edit_mode(PromptEditMode::Emacs);
+        editor.move_to_position(0, false);
+        editor.run_edit_command(&EditCommand::Extend(word_start_fwd()));
+        assert_eq!(editor.get_selection(), Some((0, 4))); // "foo ", boundary only
     }
 
     #[test]

@@ -126,19 +126,21 @@ impl Editor {
                     let head = self.resolve_head(*t);
                     self.move_head_to(head, true);
                 }
-                // The gap-indexed model (helix; bar modes too): grow the selection
-                // to the motion's gap-indexed end, keeping the anchor — no vi-visual
-                // widening. `resolve_selection` supplies the *hopped* endpoint, so a
-                // chained `v w` advances ("foo " → "foo bar ") instead of sticking
-                // on the space; for a fresh motion it equals `op_end`.
+                // The gap-indexed model (helix; bar modes too): grow the selection,
+                // keeping the anchor, with no vi-visual widening. Resolve the motion
+                // from the *head* (the moving end), NOT the caret: the caret sits one
+                // grapheme inside the head, so a grapheme/word step measured from it
+                // lands back on the current head and the selection never grows (helix
+                // select-mode `l`/`w` stuck). From the head, `l` advances one grapheme
+                // and `w` jumps to the next word boundary.
                 SelectionExtent::Span => {
                     let geom = self.caret_geometry();
-                    let origin = self.insertion_point();
-                    let head = resolve_selection(self.get_buffer(), origin, *t, geom).head();
-                    let next = self
-                        .line_buffer
-                        .cursor()
-                        .extend_span(self.get_buffer(), head, geom);
+                    let head_pos = self.line_buffer.cursor().head();
+                    let op_end = resolve_motion(self.get_buffer(), head_pos, *t, geom).op_end;
+                    let next =
+                        self.line_buffer
+                            .cursor()
+                            .extend_span(self.get_buffer(), op_end, geom);
                     self.line_buffer.set_cursor(next);
                     self.commit_cursor();
                 }
@@ -4617,5 +4619,22 @@ mod test {
         assert_eq!(ed.get_selection(), Some((0, 4))); // "foo "
         ed.run_edit_command(&EditCommand::Extend(w));
         assert_eq!(ed.get_selection(), Some((0, 8))); // "foo bar "
+    }
+    #[test]
+    fn helix_select_mode_grapheme_extends() {
+        // Regression: select-mode `l`/`h` must move the head and grow/shrink the
+        // selection. It was stuck because the motion resolved from the caret (one
+        // inside the head), landing back on the current head.
+        let g = |d| MotionTarget::Grapheme(d);
+        let mut ed = editor_with("abcd");
+        ed.set_edit_mode(PromptEditMode::Helix(crate::HelixMode::Select));
+        ed.move_to_position(1, false);
+        ed.commit_cursor(); // block on 'b' [1,2)
+        ed.run_edit_command(&EditCommand::Extend(g(Direction::Forward)));
+        assert_eq!(ed.get_selection(), Some((1, 3))); // "bc"
+        ed.run_edit_command(&EditCommand::Extend(g(Direction::Forward)));
+        assert_eq!(ed.get_selection(), Some((1, 4))); // "bcd"
+        ed.run_edit_command(&EditCommand::Extend(g(Direction::Backward)));
+        assert_eq!(ed.get_selection(), Some((1, 3))); // back to "bc"
     }
 }

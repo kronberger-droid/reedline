@@ -2463,6 +2463,28 @@ mod test {
     }
 
     #[rstest]
+    // Caret on whitespace that is immediately preceded by a multibyte char.
+    // `current_whitespace_start_index` must land on a char boundary or the
+    // subsequent buffer slice panics ("byte index is not a char boundary").
+    #[case("é foo", 2, "éfoo")]
+    #[case("ab é bar", 5, "ab ébar")]
+    fn test_cut_inner_word_whitespace_after_multibyte(
+        #[case] input: &str,
+        #[case] position: usize,
+        #[case] expected: &str,
+    ) {
+        let mut editor = editor_with(input);
+        editor.line_buffer.set_insertion_point(position);
+
+        editor.cut_text_object(TextObject {
+            scope: TextObjectScope::Inner,
+            object_type: TextObjectType::Word,
+        });
+
+        assert_eq!(editor.get_buffer(), expected);
+    }
+
+    #[rstest]
     #[case("abc", 1, 'X', "aXc")]
     #[case("abc", 1, '🔄', "a🔄c")]
     #[case("a🔄c", 1, 'X', "aXc")]

@@ -317,7 +317,7 @@ impl LineBuffer {
             .char_indices()
             .rev()
             .find(|(_, ch)| !ch.is_whitespace())
-            .map(|(i, _)| i + 1)
+            .map(|(i, ch)| i + ch.len_utf8())
             .unwrap_or(0)
     }
 

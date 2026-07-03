@@ -2,7 +2,7 @@ mod base;
 mod default;
 
 pub use base::{
-    Prompt, PromptEditMode, PromptEditModeDiscriminants, PromptHistorySearch,
+    Prompt, PromptEditMode, PromptEditModeDiscriminants, PromptHelixMode, PromptHistorySearch,
     PromptHistorySearchStatus, PromptViMode,
 };
 

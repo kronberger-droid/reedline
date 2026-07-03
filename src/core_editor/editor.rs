@@ -134,6 +134,29 @@ impl Editor {
                     self.place(next);
                 }
             },
+            EditCommand::Select(t) => match self.caret_extent() {
+                SelectionExtent::CoverLanding => {
+                    let origin = self.insertion_point();
+                    self.place(Cursor::point(origin));
+                    let head = self.resolve_head(*t);
+                    self.move_head_to(head, true);
+                }
+                SelectionExtent::Span => {
+                    let geom = self.caret_geometry();
+                    let origin = self.insertion_point();
+                    let op_end = resolve_motion(self.get_buffer(), origin, *t, geom).op_end;
+                    let next = Cursor::point(origin).extend_span(self.get_buffer(), op_end, geom);
+                    self.place(next);
+                }
+            },
+            EditCommand::CollapseSelection(direction) => {
+                let cursor = self.line_buffer.cursor();
+                let pos = match direction {
+                    Direction::Backward => cursor.start(),
+                    Direction::Forward => cursor.end(),
+                };
+                self.place(Cursor::point(pos));
+            }
             EditCommand::Cut {
                 target,
                 granularity,

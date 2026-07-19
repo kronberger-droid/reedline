@@ -108,13 +108,14 @@ impl PromptEditMode {
             // Vi normal/visual sweep the block cursor over the grapheme it lands
             // on (vim's inclusive visual: `vw` selects "foo b").
             PromptEditMode::Vi(_) => SelectionExtent::CoverLanding,
-            // The bar modes never form a block selection, and `op_end` is already
-            // exclusive there, so the gap-indexed `Span` is the natural (and only
-            // sensible) reading. A future block-but-gap-indexed mode (helix) adds
-            // its own arm here rather than defaulting via a catch-all.
-            PromptEditMode::Default | PromptEditMode::Emacs | PromptEditMode::Custom(_) => {
-                SelectionExtent::Span
-            }
+            // Helix is block-but-gap-indexed: `w` selects "foo " (caret on the
+            // space), not vi-visual's "foo b". The bar modes never form a block
+            // selection, and `op_end` is already exclusive there, so `Span` is the
+            // natural (and only sensible) reading for them too.
+            PromptEditMode::Helix(_)
+            | PromptEditMode::Default
+            | PromptEditMode::Emacs
+            | PromptEditMode::Custom(_) => SelectionExtent::Span,
         }
     }
 }

@@ -712,6 +712,31 @@ impl Editor {
         }
     }
 
+    /// Where completion treats the cursor: the *end* of the word under it.
+    ///
+    /// A caret cursor rests *on* a grapheme and [`Self::insertion_point`]
+    /// reports that grapheme's start, so completing there strands it
+    /// (`foo` -> `foobaro`). Complete at its far edge instead — where insert
+    /// mode sits, since leaving insert steps one grapheme back.
+    pub(crate) fn completion_point(&self) -> usize {
+        let pos = self.insertion_point();
+        if self.edit_mode.rest_policy() == RestPolicy::Between {
+            return pos;
+        }
+        let buf = self.line_buffer.get_buffer();
+        // Grapheme-aware: `pos + 1` would split a multi-byte grapheme.
+        // Yields `buf.len()` at the end, so no separate guard.
+        let next = next_grapheme_boundary(buf, pos);
+        // Under `BlockEol` the caret may rest *on* the line terminator. Stepping
+        // over it would pull the newline into the completed span and join the
+        // two lines, so the word ends at the caret instead.
+        if buf[pos..next].starts_with(['\n', '\r']) {
+            pos
+        } else {
+            next
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.line_buffer.is_empty()
     }

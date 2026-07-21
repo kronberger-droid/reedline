@@ -3332,6 +3332,76 @@ mod tests {
         assert_eq!(reedline.current_buffer_contents(), "67x");
     }
 
+    /// Completing in helix normal must treat the grapheme under the block caret
+    /// as part of the word, not stop one grapheme short of it.
+    #[cfg(feature = "helix")]
+    #[test]
+    fn helix_normal_completion_covers_the_caret_grapheme() {
+        let completer = Box::new(DefaultCompleter::new_with_wordlen(
+            vec![String::from("sshpass")],
+            1,
+        ));
+        let mut rl = seam_engine(Box::new(crate::Helix::default())).with_completer(completer);
+        rl.painter.force_prompt_anchored_for_test(0);
+
+        // type "ssh" in insert mode, then Esc -> helix normal (block on 'h')
+        type_each(&mut rl, &[ch('s'), ch('s'), ch('h')]);
+        type_each(&mut rl, &[key(KeyCode::Esc)]);
+        assert_eq!(rl.editor.insertion_point(), 2, "block caret sits on 'h'");
+        assert_eq!(rl.editor.completion_point(), 3, "word ends past the 'h'");
+
+        // drive the completion exactly as the menu does, without the painter
+        let mut saved = None;
+        let settings = crate::menu::MenuSettings::default();
+        let (input, pos) =
+            crate::menu::menu_functions::resolve_completer_input(&rl.editor, &mut saved, &settings);
+        assert_eq!((input.as_str(), pos), ("ssh", 3));
+
+        let sugg = rl.completer.complete(&input, pos);
+        crate::menu::menu_functions::replace_in_buffer(
+            sugg.into_iter().next(),
+            &mut rl.editor,
+            None,
+        );
+        assert_eq!(rl.current_buffer_contents(), "sshpass");
+    }
+
+    /// Accepting a history hint in helix normal must not eat the grapheme under
+    /// the block caret. The resting block is *anchored* (a helix cursor is a
+    /// 1-wide selection), so appending has to collapse it to a point first --
+    /// otherwise `insert_str`'s `delete_selection` removes the covered grapheme
+    /// and "ssh" + hint "-add" lands as "ss-add".
+    #[cfg(feature = "helix")]
+    #[test]
+    fn helix_normal_hint_accept_keeps_the_caret_grapheme() {
+        let mut rl = seam_engine(Box::new(crate::Helix::default()))
+            .with_hinter(Box::new(crate::DefaultHinter::default()));
+        rl.painter.force_prompt_anchored_for_test(0);
+        rl.history
+            .save(HistoryItem::from_command_line("ssh-add"))
+            .unwrap();
+
+        type_each(&mut rl, &[ch('s'), ch('s'), ch('h')]);
+        type_each(&mut rl, &[key(KeyCode::Esc)]);
+        // the resting block caret really is a live selection over the 'h'
+        assert_eq!(rl.editor.get_selection(), Some((2, 3)));
+
+        let hint = rl.hinter.as_mut().map(|h| {
+            h.handle(
+                rl.editor.get_buffer(),
+                rl.editor.insertion_point(),
+                rl.history.as_ref(),
+                false,
+                "",
+            );
+            h.complete_hint()
+        });
+        assert_eq!(hint.as_deref(), Some("-add"));
+
+        rl.accept_history_hint(hint);
+        assert_eq!(rl.current_buffer_contents(), "ssh-add");
+    }
+
     fn menu_is_active(reedline: &Reedline) -> bool {
         reedline.menus.iter().any(|menu| menu.is_active())
     }

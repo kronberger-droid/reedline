@@ -972,7 +972,15 @@ impl Reedline {
             // Determine if we need to poll (non-blocking) or can block on input.
             // We need polling if external_printer or idle_callback is configured,
             // using the shared poll_interval for the timeout.
-            let status = self.completer.poll_completion();
+            // A `ReedlineMenu::WithCompleter` menu computes on its own completer,
+            // which the engine one knows nothing about, so poll the active menu
+            // as well and take whichever status is the most alive.
+            let status = self
+                .menus
+                .iter_mut()
+                .find(|m| m.is_active())
+                .map_or(CompletionStatus::Idle, |menu| menu.poll_completion())
+                .merge(self.completer.poll_completion());
             // Anything BUT idle means work is in flight. We need to keep polling.
             let completer_pending = status != CompletionStatus::Idle;
 

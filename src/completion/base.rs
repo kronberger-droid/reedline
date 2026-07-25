@@ -107,6 +107,23 @@ pub enum CompletionStatus {
     Ready,
 }
 
+impl CompletionStatus {
+    /// Combine the statuses of two completers, keeping the most alive of the
+    /// two: [`Ready`](Self::Ready) over [`Pending`](Self::Pending) over
+    /// [`Idle`](Self::Idle).
+    ///
+    /// More than one completer can be in flight at a time: the engine's, and
+    /// the one a [`ReedlineMenu::WithCompleter`](crate::ReedlineMenu::WithCompleter)
+    /// menu owns.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Ready, _) | (_, Self::Ready) => Self::Ready,
+            (Self::Pending, _) | (_, Self::Pending) => Self::Pending,
+            (Self::Idle, Self::Idle) => Self::Idle,
+        }
+    }
+}
+
 /// A trait that defines how to convert some text and a position to a list of potential completions in that position.
 /// The text could be a part of the whole line, and the position is the index of the end of the text in the original line.
 pub trait Completer {
@@ -192,5 +209,37 @@ impl Suggestion {
     /// Get value to display to user for this suggestion
     pub fn display_value(&self) -> &str {
         self.display_override.as_ref().unwrap_or(&self.value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::both_idle(CompletionStatus::Idle, CompletionStatus::Idle, CompletionStatus::Idle)]
+    #[case::pending_wins_over_idle(
+        CompletionStatus::Idle,
+        CompletionStatus::Pending,
+        CompletionStatus::Pending
+    )]
+    #[case::ready_wins_over_idle(
+        CompletionStatus::Ready,
+        CompletionStatus::Idle,
+        CompletionStatus::Ready
+    )]
+    #[case::ready_wins_over_pending(
+        CompletionStatus::Pending,
+        CompletionStatus::Ready,
+        CompletionStatus::Ready
+    )]
+    fn test_status_merge(
+        #[case] left: CompletionStatus,
+        #[case] right: CompletionStatus,
+        #[case] expected: CompletionStatus,
+    ) {
+        assert_eq!(left.merge(right), expected);
+        assert_eq!(right.merge(left), expected, "merge must be symmetric");
     }
 }

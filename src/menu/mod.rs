@@ -6,7 +6,10 @@ pub mod menu_functions;
 
 use crate::core_editor::Editor;
 use crate::History;
-use crate::{completion::history::HistoryCompleter, painting::Painter, Completer, Suggestion};
+use crate::{
+    completion::history::HistoryCompleter, painting::Painter, Completer, CompletionStatus,
+    Suggestion,
+};
 pub use columnar_menu::ColumnarMenu;
 pub use columnar_menu::TraversalDirection;
 pub use description_menu::DescriptionMenu;
@@ -417,6 +420,19 @@ impl ReedlineMenu {
         }
     }
 
+    /// Poll the completer this menu owns, if it has one.
+    ///
+    /// [`EngineCompleter`](Self::EngineCompleter) and
+    /// [`HistoryMenu`](Self::HistoryMenu) draw on completers the engine already
+    /// polls, so only [`WithCompleter`](Self::WithCompleter) has background work
+    /// of its own to report.
+    pub(crate) fn poll_completion(&mut self) -> CompletionStatus {
+        match self {
+            Self::EngineCompleter(_) | Self::HistoryMenu(_) => CompletionStatus::Idle,
+            Self::WithCompleter { completer, .. } => completer.poll_completion(),
+        }
+    }
+
     pub(crate) fn update_values(
         &mut self,
         editor: &mut Editor,
@@ -590,5 +606,44 @@ mod tests {
             settings = settings.with_input_mode(mode);
         }
         assert_eq!(settings.effective_input_mode(), expected);
+    }
+
+    /// A completer that reports a fixed status, standing in for one computing
+    /// in the background.
+    struct PollingCompleter(CompletionStatus);
+
+    impl Completer for PollingCompleter {
+        fn complete(&mut self, _line: &str, _pos: usize) -> crate::CompletionResult {
+            crate::CompletionResult::Pending
+        }
+
+        fn poll_completion(&mut self) -> CompletionStatus {
+            self.0
+        }
+    }
+
+    #[rstest]
+    #[case::idle(CompletionStatus::Idle)]
+    #[case::pending(CompletionStatus::Pending)]
+    #[case::ready(CompletionStatus::Ready)]
+    fn menu_owned_completer_is_polled(#[case] status: CompletionStatus) {
+        // A `WithCompleter` menu is the only place the engine can learn that
+        // the menu's own completer has work in flight.
+        let mut menu = ReedlineMenu::WithCompleter {
+            menu: Box::new(ColumnarMenu::default()),
+            completer: Box::new(PollingCompleter(status)),
+        };
+
+        assert_eq!(menu.poll_completion(), status);
+    }
+
+    #[test]
+    fn engine_backed_menus_report_no_work_of_their_own() {
+        // These draw on the engine's completer, which the engine polls directly.
+        let mut engine_menu = ReedlineMenu::EngineCompleter(Box::new(ColumnarMenu::default()));
+        let mut history_menu = ReedlineMenu::HistoryMenu(Box::new(ColumnarMenu::default()));
+
+        assert_eq!(engine_menu.poll_completion(), CompletionStatus::Idle);
+        assert_eq!(history_menu.poll_completion(), CompletionStatus::Idle);
     }
 }

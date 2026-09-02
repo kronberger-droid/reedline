@@ -1334,7 +1334,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::menu::MenuEvent;
+    use crate::menu::{MenuEvent, MenuSettings};
     use crate::{Color, Completer, Editor, PromptHistorySearch, Suggestion};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
@@ -2022,6 +2022,9 @@ mod tests {
     struct TestMenu(String);
 
     impl Menu for TestMenu {
+        fn settings(&self) -> &MenuSettings {
+            unimplemented!()
+        }
         fn menu_string(&self, _available_lines: u16, _use_ansi_coloring: bool) -> String {
             self.0.clone()
         }

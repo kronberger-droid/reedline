@@ -3,11 +3,10 @@ mod motion;
 mod parser;
 mod vi_keybindings;
 
-use std::str::FromStr;
-
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use strum::EnumString;
-pub use vi_keybindings::{default_vi_insert_keybindings, default_vi_normal_keybindings};
+pub use vi_keybindings::{
+    default_vi_insert_keybindings, default_vi_normal_keybindings, default_vi_visual_keybindings,
+};
 
 use super::{is_plain_char, is_text_char, parse_non_key_event, EditMode};
 use crate::{
@@ -16,12 +15,21 @@ use crate::{
     Direction, MotionTarget, PromptEditMode, PromptViMode,
 };
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, EnumString)]
-#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ViMode {
     Normal,
     Insert,
     Visual,
+}
+
+impl From<PromptViMode> for ViMode {
+    fn from(mode: PromptViMode) -> Self {
+        match mode {
+            PromptViMode::Normal => ViMode::Normal,
+            PromptViMode::Insert => ViMode::Insert,
+            PromptViMode::Visual => ViMode::Visual,
+        }
+    }
 }
 
 /// This parses incoming input `Event`s like a Vi-Style editor
@@ -29,6 +37,7 @@ pub struct Vi {
     cache: Vec<char>,
     insert_keybindings: Keybindings,
     normal_keybindings: Keybindings,
+    visual_keybindings: Keybindings,
     mode: ViMode,
     previous: Option<ReedlineEvent>,
     // last f, F, t, T motion for ; and ,
@@ -40,6 +49,7 @@ impl Default for Vi {
         Vi {
             insert_keybindings: default_vi_insert_keybindings(),
             normal_keybindings: default_vi_normal_keybindings(),
+            visual_keybindings: default_vi_visual_keybindings(),
             cache: Vec::new(),
             mode: ViMode::Insert,
             previous: None,
@@ -49,12 +59,26 @@ impl Default for Vi {
 }
 
 impl Vi {
-    /// Creates Vi editor using defined keybindings
-    pub fn new(insert_keybindings: Keybindings, normal_keybindings: Keybindings) -> Self {
+    /// Creates Vi editor using defined keybindings, one table per mode.
+    pub fn new(
+        insert_keybindings: Keybindings,
+        normal_keybindings: Keybindings,
+        visual_keybindings: Keybindings,
+    ) -> Self {
         Self {
             insert_keybindings,
             normal_keybindings,
+            visual_keybindings,
             ..Default::default()
+        }
+    }
+
+    /// The keybinding table for the mode the machine is in.
+    fn keybindings(&self) -> &Keybindings {
+        match self.mode {
+            ViMode::Normal => &self.normal_keybindings,
+            ViMode::Insert => &self.insert_keybindings,
+            ViMode::Visual => &self.visual_keybindings,
         }
     }
 }
@@ -82,9 +106,7 @@ impl EditMode for Vi {
                 (ViMode::Normal | ViMode::Visual, modifier, KeyCode::Char(c)) => {
                     let c = c.to_ascii_lowercase();
 
-                    let binding = self
-                        .normal_keybindings
-                        .find_binding(modifiers, KeyCode::Char(c));
+                    let binding = self.keybindings().find_binding(modifiers, KeyCode::Char(c));
                     let is_typeable = is_plain_char(modifier);
 
                     // A pending multi-key motion (e.g. `f<char>`) must be completed
@@ -162,7 +184,7 @@ impl EditMode for Vi {
                     ReedlineEvent::Multiple(events)
                 }
                 (ViMode::Normal | ViMode::Visual, _, _) => self
-                    .normal_keybindings
+                    .keybindings()
                     .find_binding(modifiers, code)
                     .unwrap_or_else(|| {
                         // Default Enter behavior when no custom binding
@@ -184,7 +206,7 @@ impl EditMode for Vi {
                         }
                     }),
                 (ViMode::Insert, _, _) => self
-                    .insert_keybindings
+                    .keybindings()
                     .find_binding(modifiers, code)
                     .unwrap_or_else(|| {
                         // Default Enter behavior when no custom binding
@@ -212,14 +234,13 @@ impl EditMode for Vi {
 
     fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> EventStatus {
         match event {
-            ReedlineEvent::ViChangeMode(mode_str) => match ViMode::from_str(&mode_str) {
-                Ok(mode) => {
-                    self.cache.clear();
-                    self.mode = mode;
-                    EventStatus::Handled
-                }
-                Err(_) => EventStatus::Inapplicable,
-            },
+            ReedlineEvent::SwitchMode(PromptEditMode::Vi(target)) => {
+                // Abandon a half-typed sequence (`3f`), or the next key would
+                // be parsed as its argument in the new mode.
+                self.cache.clear();
+                self.mode = ViMode::from(target);
+                EventStatus::Handled
+            }
             _ => EventStatus::Inapplicable,
         }
     }
@@ -914,29 +935,35 @@ mod test {
         assert_eq!(dot, ReedlineEvent::Multiple(vec![dw]));
     }
 
-    // --- ViChangeMode ---
+    // --- SwitchMode ---
 
     #[rstest]
-    #[case("insert", ViMode::Insert)]
-    #[case("Normal", ViMode::Normal)]
-    #[case("VISUAL", ViMode::Visual)]
-    fn change_mode_event_switches_the_machine(#[case] name: &str, #[case] expected: ViMode) {
+    #[case(PromptViMode::Insert, ViMode::Insert)]
+    #[case(PromptViMode::Normal, ViMode::Normal)]
+    #[case(PromptViMode::Visual, ViMode::Visual)]
+    fn switch_mode_event_switches_the_machine(
+        #[case] target: PromptViMode,
+        #[case] expected: ViMode,
+    ) {
         let mut vi = Vi::default();
-        let status = vi.handle_mode_specific_event(ReedlineEvent::ViChangeMode(name.into()));
+        let status =
+            vi.handle_mode_specific_event(ReedlineEvent::SwitchMode(PromptEditMode::Vi(target)));
         assert!(matches!(status, EventStatus::Handled));
         assert_eq!(vi.mode, expected);
     }
 
     #[test]
-    fn change_mode_event_rejects_an_unknown_mode() {
+    fn switch_mode_event_declines_another_machine() {
         let mut vi = Vi::default();
-        let status = vi.handle_mode_specific_event(ReedlineEvent::ViChangeMode("select".into()));
+        let status = vi.handle_mode_specific_event(ReedlineEvent::SwitchMode(
+            PromptEditMode::Helix(crate::PromptHelixMode::Normal),
+        ));
         assert!(matches!(status, EventStatus::Inapplicable));
         assert_eq!(vi.mode, ViMode::Insert);
     }
 
     #[test]
-    fn change_mode_event_abandons_a_half_typed_sequence() {
+    fn switch_mode_event_abandons_a_half_typed_sequence() {
         let mut vi = Vi {
             mode: ViMode::Normal,
             ..Default::default()
@@ -947,8 +974,45 @@ mod test {
         let _ = vi.parse_event(key(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(!vi.cache.is_empty(), "setup: sequence is armed");
 
-        vi.handle_mode_specific_event(ReedlineEvent::ViChangeMode("insert".into()));
+        vi.handle_mode_specific_event(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+            PromptViMode::Insert,
+        )));
         assert!(vi.cache.is_empty());
         assert_eq!(vi.mode, ViMode::Insert);
+    }
+
+    // --- visual keybinding table ---
+
+    /// Visual has its own table: a binding placed there fires after `v`, and a
+    /// binding placed only in the normal table does not.
+    #[test]
+    fn visual_mode_reads_its_own_keybinding_table() {
+        let mut normal = default_vi_normal_keybindings();
+        normal.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('t'),
+            ReedlineEvent::ClearScrollback,
+        );
+        let mut visual = default_vi_visual_keybindings();
+        visual.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('t'),
+            ReedlineEvent::ClearScreen,
+        );
+        let mut vi = Vi {
+            mode: ViMode::Normal,
+            ..Vi::new(default_vi_insert_keybindings(), normal, visual)
+        };
+
+        assert_eq!(
+            vi.parse_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            ReedlineEvent::ClearScrollback
+        );
+        let _ = vi.parse_event(key(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(vi.mode, ViMode::Visual, "setup: `v` enters visual");
+        assert_eq!(
+            vi.parse_event(key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            ReedlineEvent::ClearScreen
+        );
     }
 }

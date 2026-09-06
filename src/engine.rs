@@ -1470,6 +1470,10 @@ impl Reedline {
             | ReedlineEvent::MenuPageNext
             | ReedlineEvent::MenuPagePrevious
             | ReedlineEvent::SwitchMode(_) => Ok(EventStatus::Inapplicable),
+            #[allow(deprecated)]
+            ReedlineEvent::ViChangeMode(_) | ReedlineEvent::HelixChangeMode(_) => {
+                Ok(EventStatus::Inapplicable)
+            }
         }
     }
 
@@ -1842,6 +1846,20 @@ impl Reedline {
                 Ok(EventStatus::Inapplicable)
             }
             ReedlineEvent::SwitchMode(_) => Ok(self.change_edit_mode(event)),
+            // The deprecated spellings are lowered onto `SwitchMode` here, so
+            // the machines only ever see the typed event.
+            #[allow(deprecated)]
+            ReedlineEvent::ViChangeMode(name) => {
+                Ok(name.parse().map_or(EventStatus::Inapplicable, |mode| {
+                    self.change_edit_mode(ReedlineEvent::SwitchMode(PromptEditMode::Vi(mode)))
+                }))
+            }
+            #[allow(deprecated)]
+            ReedlineEvent::HelixChangeMode(name) => {
+                Ok(name.parse().map_or(EventStatus::Inapplicable, |mode| {
+                    self.change_edit_mode(ReedlineEvent::SwitchMode(PromptEditMode::Helix(mode)))
+                }))
+            }
             ReedlineEvent::Mouse {
                 column,
                 row,
@@ -4289,6 +4307,63 @@ mod tests {
         assert_eq!(
             rl.prompt_edit_mode(),
             PromptEditMode::Vi(PromptViMode::Normal)
+        );
+    }
+
+    /// The deprecated events are lowered onto `SwitchMode` at the dispatch
+    /// seam, so they route through the registry like the typed event: a
+    /// `ViChangeMode` fired under emacs activates a standby vi machine.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_change_mode_events_lower_onto_switch_mode() {
+        let mut emacs = crate::default_emacs_keybindings();
+        emacs.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('v'),
+            ReedlineEvent::ViChangeMode("Normal".into()),
+        );
+        let mut vi_normal = crate::default_vi_normal_keybindings();
+        vi_normal.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('h'),
+            ReedlineEvent::HelixChangeMode("select".into()),
+        );
+        let mut rl = Reedline::create()
+            .with_edit_mode(Box::new(crate::Emacs::new(emacs)))
+            .with_additional_edit_mode(Box::new(crate::Vi::new(
+                crate::default_vi_insert_keybindings(),
+                vi_normal,
+                crate::default_vi_visual_keybindings(),
+            )))
+            .with_additional_edit_mode(Box::<crate::Helix>::default());
+        rl.painter.force_prompt_anchored_for_test(0);
+
+        drive_until_signal(&mut rl, &[ch('a'), ctrl('v')]);
+        assert_eq!(
+            rl.prompt_edit_mode(),
+            PromptEditMode::Vi(PromptViMode::Normal)
+        );
+        drive_until_signal(&mut rl, &[ctrl('h')]);
+        assert_eq!(
+            rl.prompt_edit_mode(),
+            PromptEditMode::Helix(PromptHelixMode::Select)
+        );
+    }
+
+    /// An unknown name keeps the old contract of the deprecated events.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_change_mode_event_with_an_unknown_name_is_inapplicable() {
+        let prompt = DefaultPrompt::default();
+        let mut rl = Reedline::create().with_edit_mode(Box::<crate::Vi>::default());
+
+        let status = rl
+            .handle_event(&prompt, ReedlineEvent::ViChangeMode("select".into()))
+            .expect("switching does not touch the terminal");
+        assert!(matches!(status, EventStatus::Inapplicable));
+        assert_eq!(
+            rl.prompt_edit_mode(),
+            PromptEditMode::Vi(PromptViMode::Insert)
         );
     }
 

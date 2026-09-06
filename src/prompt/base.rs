@@ -147,7 +147,8 @@ impl PromptEditMode {
 }
 
 /// The vi-specific modes that the prompt can be in
-#[derive(Serialize, Deserialize, Clone, Debug, EnumIter, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, EnumIter, EnumString, Default, PartialEq, Eq)]
+#[strum(ascii_case_insensitive)]
 pub enum PromptViMode {
     /// The default mode
     #[default]
@@ -162,7 +163,8 @@ pub enum PromptViMode {
 }
 
 /// The helix/Kakoune like modes that the prompt can be in
-#[derive(Serialize, Deserialize, Clone, Debug, EnumIter, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, EnumIter, EnumString, Default, PartialEq, Eq)]
+#[strum(ascii_case_insensitive)]
 pub enum PromptHelixMode {
     /// Normal mode carries an at least 1 grapheme wide selection and
     /// extends it depending on the motion and its target; both anchor

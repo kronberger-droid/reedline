@@ -1,3 +1,7 @@
+// The serde and strum derives on `ReedlineEvent` name its deprecated variants;
+// an `allow` on the enum does not reach those generated impls.
+#![allow(deprecated)]
+
 use crate::PromptEditMode;
 use crossterm::event::{Event, KeyEvent, KeyEventKind};
 use serde::{Deserialize, Serialize};
@@ -1160,6 +1164,20 @@ pub enum ReedlineEvent {
     /// inside an [`UntilFound`](ReedlineEvent::UntilFound) it hands the key to
     /// the next event in the list instead.
     SwitchMode(PromptEditMode),
+
+    /// Deprecated spelling of [`SwitchMode`](ReedlineEvent::SwitchMode) with a
+    /// [`PromptEditMode::Vi`] target: `normal`, `insert` or `visual`, matched
+    /// case-insensitively. Lowered onto `SwitchMode` by the engine; an unknown
+    /// name reports the event inapplicable.
+    #[deprecated(since = "0.52.0", note = "use `SwitchMode(PromptEditMode::Vi(..))`")]
+    ViChangeMode(String),
+
+    /// Deprecated spelling of [`SwitchMode`](ReedlineEvent::SwitchMode) with a
+    /// [`PromptEditMode::Helix`] target: `normal`, `insert` or `select`, matched
+    /// case-insensitively. Lowered onto `SwitchMode` by the engine; an unknown
+    /// name reports the event inapplicable.
+    #[deprecated(since = "0.52.0", note = "use `SwitchMode(PromptEditMode::Helix(..))`")]
+    HelixChangeMode(String),
 }
 
 pub enum EventStatus {

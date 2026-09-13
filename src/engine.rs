@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::ControlFlow, path::PathBuf};
+use std::{collections::HashMap, mem, ops::ControlFlow, path::PathBuf};
 
 use itertools::Itertools;
 use nu_ansi_term::{Color, Style};
@@ -113,6 +113,14 @@ impl MouseClickMode {
     }
 }
 
+#[derive(Default)]
+enum HistoryLastRun {
+    Stored(HistoryItemId),
+    Excluded(HistoryItem),
+    #[default]
+    Empty,
+}
+
 /// Line editor engine
 ///
 /// ## Example usage
@@ -139,10 +147,8 @@ pub struct Reedline {
     history: Box<dyn History>,
     history_cursor: HistoryCursor,
     history_session_id: Option<HistorySessionId>,
-    // none if history doesn't support this
-    history_last_run_id: Option<HistoryItemId>,
+    history_last_run: HistoryLastRun,
     history_exclusion_prefix: Option<String>,
-    history_excluded_item: Option<HistoryItem>,
     history_cursor_on_excluded: bool,
     /// Last failed `history.save`, until [`Reedline::take_history_save_error`].
     history_save_error: Option<ReedlineError>,
@@ -332,8 +338,6 @@ fn invalidate_anchor_if_host_completer_runs(menu: &ReedlineMenu, painter: &mut P
 }
 
 impl Reedline {
-    const FILTERED_ITEM_ID: HistoryItemId = HistoryItemId(i64::MAX);
-
     /// Create a new [`Reedline`] engine with a local [`History`] that is not synchronized to a file.
     #[must_use]
     pub fn create() -> Self {
@@ -358,9 +362,8 @@ impl Reedline {
                 hist_session_id,
             ),
             history_session_id: hist_session_id,
-            history_last_run_id: None,
+            history_last_run: HistoryLastRun::Empty,
             history_exclusion_prefix: None,
-            history_excluded_item: None,
             history_cursor_on_excluded: false,
             history_save_error: None,
             input_mode: InputMode::Regular,
@@ -921,7 +924,7 @@ impl Reedline {
     /// When no commands have been run, calling [`Self::update_last_command_context`]
     /// does not make sense and is guaranteed to fail with a "No command run" error.
     pub fn has_last_command_context(&self) -> bool {
-        self.history_last_run_id.is_some()
+        !matches!(self.history_last_run, HistoryLastRun::Empty)
     }
 
     /// update the last history item with more information
@@ -929,13 +932,16 @@ impl Reedline {
         &mut self,
         f: &dyn Fn(HistoryItem) -> HistoryItem,
     ) -> crate::Result<()> {
-        match &self.history_last_run_id {
-            Some(Self::FILTERED_ITEM_ID) => {
-                self.history_excluded_item = self.history_excluded_item.take().map(f);
+        match mem::take(&mut self.history_last_run) {
+            HistoryLastRun::Excluded(item) => {
+                self.history_last_run = HistoryLastRun::Excluded(f(item));
                 Ok(())
             }
-            Some(r) => self.history.update(*r, f),
-            None => Err(ReedlineError(ReedlineErrorVariants::OtherHistoryError(
+            HistoryLastRun::Stored(r) => {
+                self.history_last_run = HistoryLastRun::Stored(r);
+                self.history.update(r, f)
+            }
+            HistoryLastRun::Empty => Err(ReedlineError(ReedlineErrorVariants::OtherHistoryError(
                 "No command run",
             ))),
         }
@@ -1943,7 +1949,7 @@ impl Reedline {
                 self.get_history_session_id(),
             );
 
-            if self.history_excluded_item.is_some() {
+            if matches!(self.history_last_run, HistoryLastRun::Excluded(_)) {
                 self.history_cursor_on_excluded = true;
             }
         }
@@ -1980,7 +1986,7 @@ impl Reedline {
 
             if cursor_was_on_item
                 && self.history_cursor.string_at_cursor().is_none()
-                && self.history_excluded_item.is_some()
+                && matches!(self.history_last_run, HistoryLastRun::Excluded(_))
             {
                 self.history_cursor_on_excluded = true;
             }
@@ -2079,7 +2085,7 @@ impl Reedline {
     /// Not used for the separate modal reverse search!
     fn update_buffer_from_history(&mut self) {
         if self.history_cursor_on_excluded {
-            if let Some(item) = &self.history_excluded_item {
+            if let HistoryLastRun::Excluded(item) = &self.history_last_run {
                 self.editor
                     .set_buffer(item.command_line.clone(), UndoBehavior::HistoryNavigation);
             }
@@ -2851,14 +2857,11 @@ impl Reedline {
 
             match saved {
                 Some(saved) => {
-                    self.history_last_run_id = saved.id;
-                    self.history_excluded_item = None;
+                    self.history_last_run = saved
+                        .id
+                        .map_or(HistoryLastRun::Empty, HistoryLastRun::Stored)
                 }
-                None => {
-                    entry.id = Some(Self::FILTERED_ITEM_ID);
-                    self.history_last_run_id = entry.id;
-                    self.history_excluded_item = Some(entry);
-                }
+                None => self.history_last_run = HistoryLastRun::Excluded(entry),
             }
         }
         self.run_edit_commands(&[EditCommand::Clear]);
@@ -3922,12 +3925,13 @@ mod tests {
             item
         })
         .expect("context update works off the store");
-        assert_eq!(
-            rl.history_excluded_item
-                .as_ref()
-                .and_then(|i| i.exit_status),
-            Some(7)
-        );
+        assert!(matches!(
+            rl.history_last_run,
+            HistoryLastRun::Excluded(HistoryItem {
+                exit_status: Some(7),
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -3,7 +3,8 @@ use crate::{CursorConfig, PromptEditMode};
 
 use {
     super::utils::{
-        advance_grapheme, coerce_crlf, deferred_wrap_row, line_width, resolve_wrap, wrap_position,
+        advance_grapheme, clip_to_width, coerce_crlf, deferred_wrap_row, line_width, resolve_wrap,
+        wrap_position,
     },
     crate::{
         menu::{Menu, ReedlineMenu},
@@ -207,6 +208,8 @@ pub struct RenderSnapshot {
     pub screen_height: u16,
     pub prompt_start_row: u16,
     pub prompt_height: u16,
+    /// Live region rows drawn above the prompt in this paint.
+    pub live_region_rows: u16,
     pub large_buffer: bool,
     pub prompt_str_left: String,
     pub prompt_indicator: String,
@@ -275,6 +278,11 @@ pub(crate) struct PromptLayout {
 
     /// Buffer start column on first visible line.
     first_buffer_col: u16,
+
+    /// Live region rows drawn above the prompt this paint. Short of
+    /// `PromptLines::live_region_rows` only in large-buffer mode, where the
+    /// region gives up its rows before the prompt and buffer do.
+    live_region_rows: u16,
 }
 
 /// Cached row where the prompt starts on screen, together with its
@@ -463,17 +471,29 @@ impl Painter {
         let screen_width = self.screen_width();
         let screen_height = self.screen_height();
 
-        // Large buffer extra rows computation
-        let (extra_rows, extra_rows_after_prompt) = if self.large_buffer {
+        // Large buffer extra rows computation. The live region is the first
+        // thing to scroll off: it is status, the prompt and buffer are what is
+        // being edited.
+        let region_rows = lines.live_region_rows() as usize;
+        let (extra_rows, extra_rows_after_prompt, live_region_rows) = if self.large_buffer {
             let prompt_rows_after_first = lines.prompt_height(screen_width) as usize - 1;
             let prompt_indicator_lines = lines.prompt_indicator.lines().count();
             let before_cursor_lines = lines.before_cursor.lines().count();
-            let total_lines_before =
-                prompt_rows_after_first + prompt_indicator_lines + before_cursor_lines - 1;
+            let total_lines_before = region_rows
+                + prompt_rows_after_first
+                + prompt_indicator_lines
+                + before_cursor_lines
+                - 1;
             let extra = total_lines_before.saturating_sub(screen_height as usize);
-            (extra, extra.saturating_sub(prompt_rows_after_first))
+            let region_skipped = extra.min(region_rows);
+            let extra = extra - region_skipped;
+            (
+                extra,
+                extra.saturating_sub(prompt_rows_after_first),
+                (region_rows - region_skipped) as u16,
+            )
         } else {
-            (0, 0)
+            (0, 0, region_rows as u16)
         };
 
         // Large buffer offset for menu space
@@ -497,7 +517,7 @@ impl Painter {
         };
 
         // Right prompt layout
-        let right_prompt = self.compute_right_prompt(lines, extra_rows);
+        let right_prompt = self.compute_right_prompt(lines, extra_rows, live_region_rows);
 
         // Menu start row
         let menu_start_row = menu.map(|menu| {
@@ -530,6 +550,7 @@ impl Painter {
             right_prompt,
             menu_start_row,
             first_buffer_col,
+            live_region_rows,
         }
     }
 
@@ -544,6 +565,7 @@ impl Painter {
         &self,
         lines: &PromptLines,
         extra_rows: usize,
+        live_region_rows: u16,
     ) -> Option<RightPromptBounds> {
         if self.term_is_dumb
             || lines.prompt_str_right.is_empty()
@@ -561,7 +583,8 @@ impl Painter {
             return None;
         }
 
-        let mut row = self.prompt_start_row.last_known_row();
+        // The region sits above the prompt, so the prompt's rows start below it.
+        let mut row = self.prompt_start_row.last_known_row() + live_region_rows;
         if lines.right_prompt_on_last_line {
             row += lines.prompt_height(screen_width) - 1;
         }
@@ -723,7 +746,6 @@ impl Painter {
 
         let screen_width = self.screen_width();
 
-        self.prompt_height = lines.prompt_height(screen_width);
         let lines_before_cursor = lines.required_lines(screen_width, true, None);
 
         // Calibrate prompt start position for multi-line prompt/content before cursor. Check issue #841/#848/#930
@@ -789,6 +811,10 @@ impl Painter {
         self.clear_from_anchor(anchor_row)?;
 
         let layout = self.compute_layout(lines, menu);
+
+        // The live region rows drawn above the prompt count too: what sits
+        // below the prompt starts below them.
+        self.prompt_height = lines.prompt_height(screen_width) + layout.live_region_rows;
 
         let margin_cursor_row = if self.large_buffer {
             self.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
@@ -860,6 +886,7 @@ impl Painter {
             screen_height: self.screen_height(),
             prompt_start_row: self.prompt_start_row.last_known_row(),
             prompt_height: self.prompt_height,
+            live_region_rows: layout.live_region_rows,
             large_buffer: self.large_buffer,
             prompt_str_left: lines.prompt_str_left.to_string(),
             prompt_indicator: lines.prompt_indicator.to_string(),
@@ -967,7 +994,8 @@ impl Painter {
                     ],
                     screen_width,
                 )
-                .map_or(0, |end| resolve_wrap(end, screen_width).1);
+                .map_or(0, |end| resolve_wrap(end, screen_width).1)
+                .saturating_add(snapshot.live_region_rows);
                 let remaining_lines = snapshot.screen_height.saturating_sub(cursor_distance);
                 let offset = remaining_lines.saturating_sub(1) as usize;
                 skip_buffer_lines_range(&snapshot.after_cursor, 0, Some(offset))
@@ -1046,7 +1074,7 @@ impl Painter {
         };
         let (start_col, row) = (rp.start_col, rp.row);
 
-        let margin_row = self.margin_cursor_row(printed_before);
+        let margin_row = self.margin_cursor_row(layout, printed_before);
 
         self.stdout
             .queue(SavePosition)?
@@ -1128,10 +1156,43 @@ impl Painter {
     /// the deferred wrap at a row the terminal has not scrolled into existence,
     /// and a move there gets clamped to the bottom row's first column, a whole
     /// row from the text. Restoring at least lands next to it.
-    fn margin_cursor_row<'a>(&self, printed: impl IntoIterator<Item = &'a str>) -> Option<u16> {
+    fn margin_cursor_row<'a>(
+        &self,
+        layout: &PromptLayout,
+        printed: impl IntoIterator<Item = &'a str>,
+    ) -> Option<u16> {
         let rows = deferred_wrap_row(printed, self.screen_width())?;
-        let row = self.prompt_start_row.last_known_row().saturating_add(rows);
+        // `printed` starts below the live region, so its rows count from there.
+        let row = self
+            .prompt_start_row
+            .last_known_row()
+            .saturating_add(layout.live_region_rows)
+            .saturating_add(rows);
         (row < self.screen_height()).then_some(row)
+    }
+
+    /// Draws the live region rows above the prompt: each line on a row of its
+    /// own, clipped rather than wrapped so the rows reserved for it hold. Ends
+    /// with a style reset, since the lines come from the host and a colour
+    /// left open would run into the prompt.
+    fn print_live_region(&mut self, lines: &PromptLines, layout: &PromptLayout) -> Result<()> {
+        let shown = layout.live_region_rows as usize;
+        if shown == 0 {
+            return Ok(());
+        }
+        let width = self.screen_width();
+        let skipped = lines.live_region.len().saturating_sub(shown);
+        for line in lines.live_region.iter().skip(skipped) {
+            // One row per entry: a newline inside one would break the count.
+            let line = line.lines().next().unwrap_or_default();
+            self.stdout
+                .queue(Print(clip_to_width(line, width)))?
+                .queue(Print("\r\n"))?;
+        }
+        self.stdout
+            .queue(SetAttribute(Attribute::Reset))?
+            .queue(ResetColor)?;
+        Ok(())
     }
 
     fn print_small_buffer(
@@ -1142,6 +1203,8 @@ impl Painter {
         use_ansi_coloring: bool,
         layout: &PromptLayout,
     ) -> Result<Option<u16>> {
+        self.print_live_region(lines, layout)?;
+
         // Emit prompt start marker (OSC 133;A;k=i for primary prompt)
         if let Some(markers) = &self.semantic_markers {
             self.stdout
@@ -1193,11 +1256,14 @@ impl Painter {
         }
         self.stdout.queue(Print(&lines.after_cursor))?;
 
-        let cursor_row = self.margin_cursor_row([
-            &*lines.prompt_str_left,
-            &lines.prompt_indicator,
-            &lines.before_cursor,
-        ]);
+        let cursor_row = self.margin_cursor_row(
+            layout,
+            [
+                &*lines.prompt_str_left,
+                &lines.prompt_indicator,
+                &lines.before_cursor,
+            ],
+        );
 
         if let Some(menu) = menu {
             self.print_menu(menu, use_ansi_coloring, layout)?;
@@ -1218,11 +1284,16 @@ impl Painter {
     ) -> Result<Option<u16>> {
         let screen_width = self.screen_width();
         let screen_height = self.screen_height();
-        let cursor_distance = lines.distance_from_prompt(screen_width);
+        // Region rows that scrolled off are not between the anchor and the cursor.
+        let cursor_distance = lines
+            .distance_from_prompt(screen_width)
+            .saturating_sub(lines.live_region_rows() - layout.live_region_rows);
         let remaining_lines = screen_height.saturating_sub(cursor_distance);
 
         let extra_rows = layout.extra_rows;
         let extra_rows_after_prompt = layout.extra_rows_after_prompt;
+
+        self.print_live_region(lines, layout)?;
 
         // Emit prompt start marker (OSC 133;A;k=i for primary prompt) only if prompt is visible
         if extra_rows == 0 {
@@ -1287,8 +1358,10 @@ impl Painter {
         }
 
         // Computed from the *skipped* text, which is what reached the screen.
-        let cursor_row =
-            self.margin_cursor_row([prompt_skipped, indicator_skipped, before_cursor_skipped]);
+        let cursor_row = self.margin_cursor_row(
+            layout,
+            [prompt_skipped, indicator_skipped, before_cursor_skipped],
+        );
 
         if let Some(menu) = menu {
             // TODO: Also solve the difficult problem of displaying (parts of)
@@ -2125,6 +2198,7 @@ mod tests {
             screen_height: 10,
             prompt_start_row: 0,
             prompt_height: 1,
+            live_region_rows: 0,
             large_buffer: false,
             prompt_str_left: TEST_PROMPT.to_string(),
             prompt_indicator: "".to_string(),
@@ -2238,6 +2312,7 @@ mod tests {
             after_cursor: Cow::Borrowed(after),
             hint: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
+            live_region: Vec::new(),
         }
     }
 
@@ -2379,6 +2454,86 @@ mod tests {
             )
             .expect("repaint_buffer failed");
         assert!(painter.exit_right_prompt.is_none());
+    }
+
+    /// The region rows go above the prompt and outside its OSC 133 marker, so
+    /// jump-to-prompt lands on the prompt and not on a status line. They are
+    /// part of the block, so the reservation and `prompt_height` grow with them.
+    #[test]
+    fn live_region_is_drawn_above_the_prompt_marker() {
+        use crate::terminal_extensions::semantic_prompt::Osc133Markers;
+
+        let mut lines = make_lines("> ", "", "", "cmd", "");
+        lines.live_region = vec!["job 1".into(), "job 2".into()];
+        let mut p = Painter::new(W::capture());
+        p.terminal_size = (20, 10);
+        p.prompt_start_row.mark_verified(0);
+        p.set_semantic_markers(Some(Box::new(Osc133Markers)));
+        p.repaint_buffer(
+            &TestPrompt,
+            &lines,
+            PromptEditMode::Default,
+            None,
+            false,
+            &None,
+        )
+        .expect("repaint_buffer failed");
+        let out = String::from_utf8_lossy(p.stdout.captured()).into_owned();
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from {out:?}"))
+        };
+
+        assert!(at("job 1\r\n") < at("job 2\r\n"));
+        assert!(at("job 2\r\n") < at("\x1b]133;A"));
+        assert!(at("\x1b]133;A") < at("cmd"));
+        assert_eq!(p.last_required_lines, 3);
+        assert_eq!(p.prompt_height, 3);
+    }
+
+    #[test]
+    fn live_region_pushes_the_right_prompt_down() {
+        let mut lines = make_lines("> ", "", "RP", "", "");
+        let p = make_painter(20, 10, false);
+        let right_prompt_row = |lines: &PromptLines| {
+            p.compute_layout(lines, None)
+                .right_prompt
+                .map(|bounds| bounds.row)
+        };
+        assert_eq!(right_prompt_row(&lines), Some(0));
+
+        lines.live_region = vec!["status".into()];
+        assert_eq!(right_prompt_row(&lines), Some(1));
+    }
+
+    /// A line wider than the screen is cut, not wrapped: the rows reserved
+    /// for the region are its line count, and a wrap would put the prompt a
+    /// row below where every later paint expects it.
+    #[test]
+    fn live_region_lines_are_clipped_not_wrapped() {
+        let mut lines = make_lines("> ", "", "", "", "");
+        lines.live_region = vec!["x".repeat(30)];
+        let (out, required, _) = capture_repaint(&lines, 0);
+
+        assert!(out.contains(&format!("{}\r\n", "x".repeat(20))), "{out:?}");
+        assert!(!out.contains(&"x".repeat(21)));
+        assert_eq!(required, 2);
+    }
+
+    /// On a screen the block does not fit, the region gives up rows before
+    /// the prompt does: it is status, the prompt and buffer are the work.
+    #[test]
+    fn large_buffer_scrolls_the_live_region_off_first() {
+        let before = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9";
+        let mut lines = make_lines("> ", "", "", before, "");
+        lines.live_region = vec!["r1".into(), "r2".into(), "r3".into()];
+        let (out, _, large) = capture_repaint(&lines, 0);
+
+        assert!(large);
+        assert!(!out.contains("r1"), "{out:?}");
+        assert!(out.contains("r2\r\n"), "{out:?}");
+        assert!(out.contains("r3\r\n"), "{out:?}");
+        assert!(out.contains("l1"), "{out:?}");
     }
 
     /// What a terminal ends up in after a byte stream.
@@ -2857,6 +3012,7 @@ mod tests {
             right_prompt: None,
             menu_start_row,
             first_buffer_col: 0,
+            live_region_rows: 0,
         };
         p.print_menu(menu, false, &layout)
             .expect("print_menu failed");

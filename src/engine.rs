@@ -229,6 +229,11 @@ pub struct Reedline {
 
     external_printer: Option<Box<dyn ExternalOutput>>,
 
+    // Lines painted above the prompt and repainted in place, never committed
+    // to scrollback. Part of the prompt block: the painter lays them out from
+    // the same anchor as the prompt.
+    live_region: Vec<String>,
+
     // Callback function that is called periodically while waiting for input.
     // Useful for processing external events (e.g., GUI updates) during idle time.
     idle_callback: Option<Box<dyn FnMut() + Send>>,
@@ -391,6 +396,7 @@ impl Reedline {
             repaint_signal: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
             external_printer: None,
+            live_region: Vec::new(),
             idle_callback: None,
         }
     }
@@ -2670,7 +2676,7 @@ impl Reedline {
                 res_string
             };
 
-            let lines = PromptLines::new(
+            let mut lines = PromptLines::new(
                 prompt,
                 self.prompt_edit_mode(),
                 Some(prompt_history_search),
@@ -2678,6 +2684,8 @@ impl Reedline {
                 "",
                 "",
             );
+
+            lines.live_region = self.live_region.clone();
 
             self.painter.repaint_buffer(
                 prompt,
@@ -2760,6 +2768,12 @@ impl Reedline {
             &after_cursor,
             &hint,
         );
+
+        // The final paint before the line is handed over runs without the
+        // region, so scrollback keeps the command line and not a status.
+        if !self.hide_hints {
+            lines.live_region = self.live_region.clone();
+        }
 
         // Updating the working details of the active menu
         for menu in self.menus.iter_mut() {
@@ -4259,6 +4273,7 @@ mod tests {
             screen_height: 10,
             prompt_start_row: 0,
             prompt_height: 1,
+            live_region_rows: 0,
             large_buffer: false,
             prompt_str_left: "".to_string(),
             prompt_indicator: "".to_string(),

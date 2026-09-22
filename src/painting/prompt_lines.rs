@@ -16,6 +16,7 @@ pub(crate) struct PromptLines<'prompt> {
     pub(crate) after_cursor: Cow<'prompt, str>,
     pub(crate) hint: Cow<'prompt, str>,
     pub(crate) right_prompt_on_last_line: bool,
+    pub(crate) live_region: Vec<String>,
 }
 
 impl<'prompt> PromptLines<'prompt> {
@@ -42,6 +43,7 @@ impl<'prompt> PromptLines<'prompt> {
         let after_cursor = coerce_crlf(after_cursor);
         let hint = coerce_crlf(hint);
         let right_prompt_on_last_line = prompt.right_prompt_on_last_line();
+        let live_region = Vec::new();
 
         Self {
             prompt_str_left,
@@ -51,6 +53,7 @@ impl<'prompt> PromptLines<'prompt> {
             after_cursor,
             hint,
             right_prompt_on_last_line,
+            live_region,
         }
     }
 
@@ -77,7 +80,10 @@ impl<'prompt> PromptLines<'prompt> {
             }
         }
 
-        let lines = estimate_required_lines(&input, terminal_columns)
+        // The live region sits above the prompt, so it adds to the rows the
+        // text takes and to the cursor's distance alike; the floor still holds.
+        let lines = (estimate_required_lines(&input, terminal_columns)
+            + self.live_region_rows() as usize)
             .max(self.distance_from_prompt(terminal_columns) as usize + 1);
 
         if let Some(menu) = menu {
@@ -87,11 +93,13 @@ impl<'prompt> PromptLines<'prompt> {
         }
     }
 
-    /// Rows from the prompt's first row to the row the cursor rests on.
+    /// Rows from the block's first row (the live region's, when there is
+    /// one) to the row the cursor rests on.
     ///
     /// Places a cursor, so a filled row resolves to the next one. That row is
     /// what `menu_start_row` opens the menu below.
     pub(crate) fn distance_from_prompt(&self, terminal_columns: u16) -> u16 {
+        let region_rows = self.live_region_rows();
         let Some(end) = wrap_position(
             [
                 &*self.prompt_str_left,
@@ -100,10 +108,10 @@ impl<'prompt> PromptLines<'prompt> {
             ],
             terminal_columns,
         ) else {
-            return 0;
+            return region_rows;
         };
 
-        resolve_wrap(end, terminal_columns).1
+        region_rows.saturating_add(resolve_wrap(end, terminal_columns).1)
     }
 
     /// Calculate the cursor pos, based on the buffer and prompt.
@@ -170,6 +178,12 @@ impl<'prompt> PromptLines<'prompt> {
         } else {
             estimate as u16
         }
+    }
+
+    /// Rows the live region takes above the prompt: one per line, since the
+    /// painter clips each line to the screen width rather than wrapping it.
+    pub(crate) fn live_region_rows(&self) -> u16 {
+        self.live_region.len().min(u16::MAX as usize) as u16
     }
 }
 
@@ -311,6 +325,7 @@ mod tests {
             after_cursor: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
+            live_region: Vec::new(),
         };
 
         let pos = prompt_lines.cursor_pos(terminal_columns);
@@ -346,6 +361,7 @@ mod tests {
             after_cursor: Cow::Borrowed(after_cursor),
             hint: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
+            live_region: Vec::new(),
         };
 
         assert_eq!(
@@ -389,6 +405,7 @@ mod tests {
             after_cursor: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
+            live_region: Vec::new(),
         };
 
         assert_eq!(
@@ -415,8 +432,34 @@ mod tests {
             after_cursor: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
+            live_region: Vec::new(),
         };
 
         assert_eq!(prompt_lines.prompt_height(20), expected);
+    }
+
+    /// The region is extra rows at the top of the block: it moves the cursor
+    /// away from the anchor and grows the reservation, but the cursor's place
+    /// relative to the prompt's last line is untouched.
+    #[test]
+    fn live_region_rows_sit_above_the_prompt() {
+        let mut lines = PromptLines {
+            prompt_str_left: Cow::Borrowed("> "),
+            prompt_str_right: Cow::Borrowed(""),
+            prompt_indicator: Cow::Borrowed(""),
+            before_cursor: Cow::Borrowed("cmd"),
+            after_cursor: Cow::Borrowed(""),
+            hint: Cow::Borrowed(""),
+            right_prompt_on_last_line: false,
+            live_region: Vec::new(),
+        };
+        assert_eq!(lines.distance_from_prompt(20), 0);
+        assert_eq!(lines.required_lines(20, false, None), 1);
+
+        lines.live_region = vec!["job 1".into(), "job 2".into()];
+        assert_eq!(lines.live_region_rows(), 2);
+        assert_eq!(lines.distance_from_prompt(20), 2);
+        assert_eq!(lines.required_lines(20, false, None), 3);
+        assert_eq!(lines.cursor_pos(20), (5, 0));
     }
 }

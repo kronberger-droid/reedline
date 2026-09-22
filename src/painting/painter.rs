@@ -21,7 +21,6 @@ use {
     std::ops::RangeInclusive,
     unicode_segmentation::UnicodeSegmentation,
 };
-#[cfg(feature = "external_printer")]
 use {crate::LineBuffer, crossterm::cursor::MoveUp};
 
 // Returns a string that skips N number of lines with the next offset of lines
@@ -1411,7 +1410,6 @@ impl Painter {
     ///
     /// This function doesn't flush the buffer. So buffer should be flushed
     /// afterwards perhaps by repainting the prompt via `repaint_buffer()`.
-    #[cfg(feature = "external_printer")]
     pub(crate) fn print_external_message(
         &mut self,
         messages: Vec<String>,

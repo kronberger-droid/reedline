@@ -88,6 +88,27 @@ pub(crate) fn line_width(line: &str) -> usize {
     strip_ansi(line).width()
 }
 
+/// `line` cut to fit `columns`, so a live region line occupies exactly one
+/// row. A line that fits comes back as is, styling included. One that
+/// overflows loses its escape sequences along with its tail: cutting through
+/// styled text takes a tokenizer, for the sake of a line the host should have
+/// kept short.
+pub(crate) fn clip_to_width(line: &str, columns: u16) -> Cow<'_, str> {
+    let columns = columns as usize;
+    if line_width(line) <= columns {
+        return Cow::Borrowed(line);
+    }
+    let mut width = 0;
+    let clipped = strip_ansi(line)
+        .graphemes(true)
+        .take_while(|grapheme| {
+            width += grapheme.width();
+            width <= columns
+        })
+        .collect();
+    Cow::Owned(clipped)
+}
+
 /// Which row to move to when printing `pieces` lands the cursor on the
 /// terminal's right margin, in the *deferred wrap* state.
 ///
@@ -215,6 +236,22 @@ mod test {
 
     /// Narrow graphemes pack a row exactly, so the margin falls on every whole
     /// multiple of the width and the row is that multiple.
+    #[rstest]
+    #[case("hello", 5, "hello")]
+    #[case("hello", 4, "hell")]
+    #[case("\x1b[31mhi\x1b[0m", 5, "\x1b[31mhi\x1b[0m")]
+    #[case("\x1b[31mhello\x1b[0m", 4, "hell")]
+    // A wide grapheme that would straddle the margin is dropped whole.
+    #[case("aあ", 2, "a")]
+    #[case("", 0, "")]
+    fn clip_to_width_holds_one_row(
+        #[case] line: &str,
+        #[case] columns: u16,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(clip_to_width(line, columns), expected);
+    }
+
     #[rstest]
     #[case("", 20, None)]
     #[case("a", 20, None)]

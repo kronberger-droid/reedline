@@ -1,10 +1,15 @@
-// Create a default reedline object to handle user input
+// Background threads that print while the user keeps editing.
+//
+// Two kinds of output: messages sent through the `ExternalPrinter` are
+// committed above the prompt and scroll into history, while the `LiveRegion`
+// holds lines that are repainted in place above the prompt and never reach
+// scrollback (a counter here; a job list or progress bar in a shell).
+//
 // to run:
 // cargo run --example external_printer
 
 use {
-    reedline::ExternalPrinter,
-    reedline::{DefaultPrompt, Reedline, Signal},
+    reedline::{DefaultPrompt, ExternalPrinter, LiveRegion, Reedline, Signal},
     std::thread,
     std::thread::sleep,
     std::time::Duration,
@@ -38,7 +43,26 @@ fn main() {
         }
     });
 
-    let mut line_editor = Reedline::create().with_external_printer(printer);
+    // live region: a counter and a spinner, replaced in place four times a
+    // second. Every `set` between two polls collapses into one repaint.
+    let region = LiveRegion::default();
+    let region_writer = region.clone();
+    thread::spawn(move || {
+        let spinner = ['|', '/', '-', '\\'];
+        let mut tick = 0usize;
+        loop {
+            sleep(Duration::from_millis(250));
+            tick += 1;
+            region_writer.set(vec![
+                format!("{} live region: tick {tick}", spinner[tick % spinner.len()]),
+                "  (updated in place, not in scrollback)".to_string(),
+            ]);
+        }
+    });
+
+    let mut line_editor = Reedline::create()
+        .with_external_printer(printer)
+        .with_live_region(region);
     let prompt = DefaultPrompt::default();
 
     loop {

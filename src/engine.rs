@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::ControlFlow, path::PathBuf};
 
 use nu_ansi_term::{Color, Style};
 
-use crate::{enums::ReedlineRawEvent, external_printer::ExternalOutput, CursorConfig};
+use crate::{enums::ReedlineRawEvent, external_printer::ExternalOutput, CursorConfig, LiveRegion};
 #[cfg(feature = "bashisms")]
 use crate::{
     history::SearchFilter,
@@ -229,10 +229,17 @@ pub struct Reedline {
 
     external_printer: Option<Box<dyn ExternalOutput>>,
 
-    // Lines painted above the prompt and repainted in place, never committed
-    // to scrollback. Part of the prompt block: the painter lays them out from
-    // the same anchor as the prompt.
-    live_region: Vec<String>,
+    // The live region as last painted: host lines drawn above the prompt and
+    // repainted in place, never committed to scrollback. Part of the prompt
+    // block, so the painter lays them out from the same anchor as the prompt.
+    // Written only from the poll loop, when the handle has an update.
+    live_region_lines: Vec<String>,
+
+    // Where live region updates come from. The host keeps clones of the
+    // handle on its producer threads; the poll loop takes the latest update
+    // and moves it into `live_region_lines`. Polling is only enabled while a
+    // clone exists, see `input_needs_polling`.
+    live_region_handle: Option<LiveRegion>,
 
     // Callback function that is called periodically while waiting for input.
     // Useful for processing external events (e.g., GUI updates) during idle time.
@@ -396,7 +403,8 @@ impl Reedline {
             repaint_signal: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
             external_printer: None,
-            live_region: Vec::new(),
+            live_region_lines: Vec::new(),
+            live_region_handle: None,
             idle_callback: None,
         }
     }
@@ -1047,16 +1055,17 @@ impl Reedline {
     /// indefinitely, so external triggers (break signal, repaint signal,
     /// external printer, idle callback) are noticed while waiting for input.
     fn input_needs_polling(&self) -> bool {
-        #[allow(unused_mut)] // Dependent on feature flags
         let mut poll = self.break_signal.is_some()
             || self
                 .repaint_signal
                 .as_ref()
-                .is_some_and(|sig| Arc::strong_count(&sig.flag) > 1);
+                .is_some_and(|sig| Arc::strong_count(&sig.flag) > 1)
+            || self
+                .live_region_handle
+                .as_ref()
+                .is_some_and(|s| s.is_shared());
 
-        {
-            poll |= self.external_printer.is_some();
-        }
+        poll |= self.external_printer.is_some();
 
         poll |= self.idle_callback.is_some();
 
@@ -1078,6 +1087,16 @@ impl Reedline {
         // Repaint requests raised while no read_line was active are stale:
         // the fresh prompt painted below already reflects the latest state.
         self.take_repaint_request();
+
+        // A region update set while the host ran a command is the newest
+        // state, not a stale one: it goes into the paint below.
+        if let Some(lines) = self
+            .live_region_handle
+            .as_ref()
+            .and_then(LiveRegion::take_update)
+        {
+            self.live_region_lines = lines;
+        }
 
         self.repaint(prompt)?;
 
@@ -1116,6 +1135,18 @@ impl Reedline {
                     )?;
                     self.repaint(prompt)?;
                 }
+            }
+
+            // After the printer, never before: a job that prints "done" and
+            // then drops its region line has the print in the channel by the
+            // time the line changes, so the drain above commits it first.
+            if let Some(lines) = self
+                .live_region_handle
+                .as_ref()
+                .and_then(LiveRegion::take_update)
+            {
+                self.live_region_lines = lines;
+                self.repaint(prompt)?;
             }
 
             // Determine if we need to poll (non-blocking) or can block on input.
@@ -2685,7 +2716,7 @@ impl Reedline {
                 "",
             );
 
-            lines.live_region = self.live_region.clone();
+            lines.live_region = self.live_region_lines.clone();
 
             self.painter.repaint_buffer(
                 prompt,
@@ -2772,7 +2803,7 @@ impl Reedline {
         // The final paint before the line is handed over runs without the
         // region, so scrollback keeps the command line and not a status.
         if !self.hide_hints {
-            lines.live_region = self.live_region.clone();
+            lines.live_region = self.live_region_lines.clone();
         }
 
         // Updating the working details of the active menu
@@ -2836,6 +2867,35 @@ impl Reedline {
     /// Adds an external printer
     pub fn with_external_printer(mut self, printer: impl ExternalOutput + 'static) -> Self {
         self.external_printer = Some(Box::new(printer));
+        self
+    }
+
+    /// Adds a live region: host-defined lines drawn above the prompt and
+    /// repainted in place while the user edits.
+    ///
+    /// Keep a clone of the [`LiveRegion`] handle on each thread that produces
+    /// status and call [`LiveRegion::set`] whenever the lines change.
+    /// `read_line` picks the update up on its next poll. Output that should
+    /// scroll into history goes through
+    /// [`with_external_printer`](Self::with_external_printer) instead.
+    ///
+    /// Polling only starts once a clone of the handle exists, so a region
+    /// that is configured but never written costs nothing.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use reedline::{LiveRegion, Reedline};
+    ///
+    /// let region = LiveRegion::default();
+    /// let editor = Reedline::create().with_live_region(region.clone());
+    ///
+    /// std::thread::spawn(move || {
+    ///     region.set(vec!["job 1: running".into()]);
+    /// });
+    /// # let _ = editor;
+    /// ```
+    pub fn with_live_region(mut self, region: LiveRegion) -> Self {
+        self.live_region_handle = Some(region);
         self
     }
 
@@ -5493,6 +5553,33 @@ mod tests {
         }
         assert!(reedline.take_repaint_request());
         assert!(!reedline.take_repaint_request());
+    }
+
+    #[test]
+    fn a_live_region_only_polls_once_a_producer_holds_a_clone() {
+        let region = LiveRegion::default();
+        let reedline = Reedline::create().with_live_region(region);
+        assert!(
+            !reedline.input_needs_polling(),
+            "a region nobody can write must not switch the loop to polling"
+        );
+    }
+
+    #[test]
+    fn a_cloned_live_region_switches_input_loop_to_polling() {
+        let region = LiveRegion::default();
+        let producer = region.clone();
+        let reedline = Reedline::create().with_live_region(region);
+        assert!(
+            reedline.input_needs_polling(),
+            "a producer holding a clone must switch the loop to polling so updates are noticed"
+        );
+
+        drop(producer);
+        assert!(
+            !reedline.input_needs_polling(),
+            "the last producer gone, the loop can block on input again"
+        );
     }
 
     #[test]

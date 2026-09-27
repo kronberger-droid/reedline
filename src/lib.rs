@@ -355,6 +355,7 @@ pub use terminal_extensions::semantic_prompt::{
 mod utils;
 
 mod external_printer;
+mod live_region;
 pub use utils::{
     get_reedline_default_keybindings, get_reedline_keybinding_modifiers, get_reedline_keycodes,
 };
@@ -362,4 +363,5 @@ pub use utils::{
 // Reexport the key types to be independent from an explicit crossterm dependency.
 pub use crossterm::event::{KeyCode, KeyModifiers};
 pub use external_printer::{ExternalOutput, ExternalPrinter};
+pub use live_region::LiveRegion;
 pub use nu_ansi_term::Color;

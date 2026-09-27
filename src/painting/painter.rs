@@ -1,3 +1,4 @@
+use crate::painting::utils::estimate_required_lines;
 use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
 use crate::{CursorConfig, PromptEditMode};
 
@@ -22,7 +23,6 @@ use {
     std::ops::RangeInclusive,
     unicode_segmentation::UnicodeSegmentation,
 };
-use {crate::LineBuffer, crossterm::cursor::MoveUp};
 
 // Returns a string that skips N number of lines with the next offset of lines
 // An offset of 0 would return only one line after skipping the required lines
@@ -1521,68 +1521,58 @@ impl Painter {
         self.print_crlf()
     }
 
-    /// Prints an external message
+    /// Commits `messages` to the screen above the prompt block, one row per
+    /// line, so they scroll into history like output printed at a quiet
+    /// prompt.
     ///
-    /// This function doesn't flush the buffer. So buffer should be flushed
-    /// afterwards perhaps by repainting the prompt via `repaint_buffer()`.
-    pub(crate) fn print_external_message(
-        &mut self,
-        messages: Vec<String>,
-        line_buffer: &LineBuffer,
-        prompt: &dyn Prompt,
-    ) -> Result<()> {
-        // adding 3 seems to be right for first line-wrap
-        let prompt_len = prompt.render_prompt_right().len() + 3;
-        let mut buffer_num_lines = 0_u16;
-        for (i, line) in line_buffer.get_buffer().lines().enumerate() {
-            let screen_lines = match i {
-                0 => {
-                    // the first line has to deal with the prompt
-                    let first_line_len = line.len() + prompt_len;
-                    // at least, it is one line
-                    // max(1): a mid-resize terminal can report width 0 (#842)
-                    ((first_line_len as u16) / self.screen_width().max(1)) + 1
-                }
-                _ => {
-                    // the n-th line, no prompt, at least, it is one line
-                    ((line.len() as u16) / self.screen_width().max(1)) + 1
-                }
-            };
-            // count up screen-lines
-            buffer_num_lines = buffer_num_lines.saturating_add(screen_lines);
-        }
-        // move upward to start print if the line-buffer is more than one screen-line
-        if buffer_num_lines > 1 {
-            self.stdout.queue(MoveUp(buffer_num_lines - 1))?;
-        }
-        let erase_line = format!("\r{}\r", " ".repeat(self.screen_width().into()));
-        let max_row = self.screen_height().saturating_sub(1);
-        let starting_row = self.prompt_start_row.last_known_row();
-        // Invalidate up front: a `?` early-return below can leave
-        // bytes in the buffer with the cache still claiming `Verified`.
+    /// The block itself, live region, prompt, buffer and anything under
+    /// them, is erased from the anchor down and the messages take its place.
+    /// On return the cursor is on the first free row below them and
+    /// `prompt_start_row` names that row; the caller repaints the block there.
+    ///
+    /// Starting at the anchor rather than at the cursor is the point. The
+    /// anchor is the one row the painter trusts, and every part of the block
+    /// sits below it, so there is no height to guess and nothing to leave
+    /// behind. The old path counted the block's rows from the buffer's bytes,
+    /// disagreed with the painter whenever the left prompt wrapped a line,
+    /// and left a copy of the prompt row on screen per batch.
+    pub(crate) fn print_external_message(&mut self, messages: Vec<String>) -> Result<()> {
+        let start = self.prompt_start_row.last_known_row();
+        // Invalidate before the first queued byte: a `?` early-return below
+        // must not leave bytes in the buffer with the cache still claiming
+        // `Verified`.
         self.invalidate_prompt_start_row();
-        let mut row = starting_row;
+
+        // Hide first, so the cursor is not seen jumping to the anchor. The
+        // repaint that follows shows it again; `hide_cursor` records the hide
+        // so a path that ends without that repaint can still undo it.
+        self.hide_cursor()?;
+        self.clear_from_anchor(start)?;
+
+        // Count where the cursor lands, for the case the terminal does not
+        // say. A line wider than the screen takes more than one row; an empty
+        // one still takes its `\r\n`. Once the cursor is on the last row a
+        // newline scrolls instead of moving, hence the cap.
+        let max_row = self.screen_height().saturating_sub(1);
+        let mut row = start;
+
         for line in messages {
-            self.stdout.queue(Print(&erase_line))?;
-            // Note: we don't use `print_line` here because we don't want to
-            // flush right now. The subsequent repaint of the prompt will cause
-            // immediate flush anyways. And if we flush here, every external
-            // print causes visible flicker.
+            // max(1) on the width: a mid-resize terminal can report 0 (#842).
+            let rows = estimate_required_lines(&line, self.screen_width().max(1)).max(1) as u16;
             self.stdout.queue(Print(line))?.queue(Print("\r\n"))?;
-            row = row.saturating_add(1).min(max_row);
+            row = (row + rows).min(max_row);
         }
+
         // The lines above are only *queued*, so the terminal's cursor has not
-        // moved yet: a row counted forward from `starting_row` names a position
-        // the terminal has not reached. Recorded as `Stale`, the next paint
-        // re-verifies it against the real, still-earlier cursor, reads that as
-        // the prompt having scrolled off the top, and re-anchors by printing a
+        // moved yet: a row counted forward from `start` names a position the
+        // terminal has not reached. Recorded as `Stale`, the next paint would
+        // re-verify it against the real, still-earlier cursor, read that as
+        // the prompt having scrolled off the top, and re-anchor by printing a
         // whole screen of newlines -- wiping the display (#1005).
         //
-        // Counting was also only as good as its assumption that a message
-        // occupies exactly one row, which fails as soon as one wraps or carries
-        // its own control sequences. Flush and ask instead: one round-trip per
-        // batch of messages, not per message, so the flicker the comment above
-        // guards against is unaffected.
+        // The count is also only as good as `estimate_required_lines`, which
+        // a message carrying its own control sequences can fool. Flush and
+        // ask instead: one round-trip per batch of messages, not per message.
         self.stdout.flush()?;
         self.prompt_start_row = match self.measure_cursor_position() {
             // Measured, so later paints can skip the drift check.
@@ -2273,14 +2263,13 @@ mod tests {
 
     // Covers the `print_external_message` call site: messages printed mid-line
     // leave the cursor below a short screen just as the prompt does.
-    #[cfg(feature = "external_printer")]
     #[test]
     fn test_print_external_message_grows_to_fit_the_cursor() {
         let mut painter = Painter::new(W::sink_with_cursor_at((0, 40)));
         painter.terminal_size = (80, 10);
 
         painter
-            .print_external_message(vec!["msg".to_string()], &LineBuffer::new(), &TestPrompt)
+            .print_external_message(vec!["msg".to_string()])
             .expect("print_external_message failed");
 
         assert_eq!(painter.screen_height(), 41);

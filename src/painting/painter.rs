@@ -1547,8 +1547,10 @@ impl Painter {
     /// the host prints over. A menu or a hint is not user input, so the erase is
     /// unconditional and only the after-cursor text goes back. Text before the
     /// cursor survives, leaving a rejected command on screen as the record of
-    /// what was aborted (#1143).
+    /// what was aborted (#1143). The live region does not: see
+    /// [`Painter::drop_live_region`].
     pub(crate) fn move_cursor_to_end(&mut self) -> Result<()> {
+        let dropped = self.drop_live_region()?;
         self.stdout.queue(Clear(ClearType::FromCursorDown))?;
         if let Some(after_cursor) = &self.after_cursor_lines {
             self.stdout.queue(Print(after_cursor))?;
@@ -1556,13 +1558,38 @@ impl Painter {
         if let Some((text, rp)) = &self.exit_right_prompt {
             self.stdout
                 .queue(SavePosition)?
-                .queue(cursor::MoveTo(rp.start_col, rp.row))?
+                .queue(cursor::MoveTo(rp.start_col, rp.row.saturating_sub(dropped)))?
                 .queue(Print(text))?
                 .queue(SetAttribute(Attribute::Reset))?
                 .queue(ResetColor)?
                 .queue(RestorePosition)?;
         }
         self.print_crlf()
+    }
+
+    /// Delete the live region rows the last paint drew, so an exit without a
+    /// final paint (Ctrl-C, Ctrl-D) does not leave status above the line,
+    /// where it would scroll into history. A submit repaints without the
+    /// region first, which leaves nothing here to delete.
+    ///
+    /// Delete Line (`CSI n M`) at the anchor shifts the rows under the region
+    /// up by `n` without redrawing them, so the aborted line stays exactly as
+    /// painted. The cursor came to rest by an absolute move (#1141), never
+    /// with a wrap pending, so saving and restoring it is safe. Returns the
+    /// rows deleted, which everything below the anchor moved up by.
+    fn drop_live_region(&mut self) -> Result<u16> {
+        let rows = self.last_layout.as_ref().map_or(0, |l| l.live_region_rows);
+        if rows == 0 || self.term_is_dumb {
+            return Ok(0);
+        }
+        let anchor = self.prompt_start_row.last_known_row();
+        self.stdout
+            .queue(SavePosition)?
+            .queue(MoveTo(0, anchor))?
+            .queue(Print(format!("\x1b[{rows}M")))?
+            .queue(RestorePosition)?
+            .queue(cursor::MoveUp(rows))?;
+        Ok(rows)
     }
 
     /// Commits `messages` to the screen above the prompt block, one row per

@@ -121,6 +121,15 @@ impl Session {
         self.screen.sync(self.painter.stdout.captured());
     }
 
+    /// Leave `read_line` without a final paint, the way Ctrl-C and Ctrl-D
+    /// do.
+    fn exit(&mut self) {
+        self.painter
+            .move_cursor_to_end()
+            .expect("move_cursor_to_end failed");
+        self.screen.sync(self.painter.stdout.captured());
+    }
+
     /// Visible rows and scrollback together, oldest first, trailing blank
     /// rows dropped: everything the user can still scroll back to.
     fn history(&mut self) -> Vec<String> {
@@ -300,6 +309,38 @@ fn external_messages_at_the_bottom_scroll_into_history_without_the_region() {
     }
 
     assert_eq!(session.history(), ["", "m1", "m2", "m3", "m4", "job", ">"]);
+}
+
+// Ctrl-C and Ctrl-D leave `read_line` without the final paint a submit gets,
+// so whatever the last paint drew stays on screen. The aborted line belongs
+// there (#1143), the region does not: it is status, and above the line it
+// would scroll into history.
+#[test]
+fn an_exit_without_a_final_paint_leaves_no_region_behind() {
+    let mut session = Session::after_output(20, 6, &["out"]);
+    session.region = vec!["job 1".into(), "job 2".into()];
+
+    session.paint(&FixedPrompt::new("> ", ""), "abort", "ed");
+    session.exit();
+
+    assert_eq!(session.history(), ["out", "> aborted"]);
+    assert_eq!(session.screen.cursor(), (0, 2));
+}
+
+// The exit reprints the right prompt at its row, which the dropped region
+// moved up.
+#[test]
+fn an_exit_puts_the_right_prompt_back_on_the_moved_line() {
+    let mut session = Session::after_output(20, 6, &["out"]);
+    session.region = vec!["job".into()];
+
+    session.paint(&FixedPrompt::new("> ", "").with_right("R", false), "x", "");
+    session.exit();
+
+    assert_eq!(
+        session.history(),
+        ["out", format!("> x{}R", " ".repeat(16)).as_str()]
+    );
 }
 
 // As above with the indicator folded into the left prompt. `prompt_height`

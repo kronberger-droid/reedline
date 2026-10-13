@@ -68,6 +68,9 @@ impl Prompt for FixedPrompt {
 struct Session {
     painter: Painter,
     screen: TestScreen,
+    /// Live region lines every paint draws above the prompt, handed over the
+    /// way the engine hands them over. Empty draws no region.
+    region: Vec<String>,
 }
 
 impl Session {
@@ -81,6 +84,7 @@ impl Session {
         Self {
             painter,
             screen: TestScreen::new(width, height),
+            region: Vec::new(),
         }
     }
 
@@ -99,7 +103,8 @@ impl Session {
     /// Paint `prompt` with the cursor between `before` and `after`.
     fn paint(&mut self, prompt: &FixedPrompt, before: &str, after: &str) {
         let mode = PromptEditMode::Default;
-        let lines = PromptLines::new(prompt, mode.clone(), None, before, after, "");
+        let mut lines = PromptLines::new(prompt, mode.clone(), None, before, after, "");
+        lines.live_region = self.region.clone();
         self.painter
             .repaint_buffer(prompt, &lines, mode, None, false, &None)
             .expect("repaint_buffer failed");
@@ -202,6 +207,20 @@ fn right_prompt_on_last_line_of_a_multiline_prompt() {
     assert_eq!(session.screen.cursor(), (4, 2));
 }
 
+#[test]
+fn live_region_sits_between_the_host_output_and_the_prompt() {
+    let mut session = Session::after_output(20, 6, &["out"]);
+    session.region = vec!["job 1".into(), "job 2".into()];
+
+    session.paint(&FixedPrompt::new("> ", ""), "ls", "");
+
+    assert_eq!(
+        session.screen.rows()[..4],
+        ["out", "job 1", "job 2", "> ls"]
+    );
+    assert_eq!(session.screen.cursor(), (4, 3));
+}
+
 // The commit starts where the painter says the block starts, erases from
 // there, and prints the messages in its place, so nothing of the old block
 // survives under them.
@@ -220,12 +239,14 @@ fn external_messages_replace_the_block_at_the_anchor() {
 }
 
 // The case from a real terminal: a left prompt long enough that the first row
-// wraps, and a message landing mid-edit. The old path moved up from the cursor
-// by a byte count and left a copy of the prompt row above each batch. The
-// message commits above the block, and exactly one prompt is drawn under it.
+// wraps, two region rows, and a message landing mid-edit. The old path moved
+// up from the cursor by a byte count, left a copy of the prompt row above each
+// batch and never reached the region rows. The message commits above the
+// region, and the region and exactly one prompt are drawn under it.
 #[test]
-fn external_messages_commit_above_the_prompt_and_leave_nothing_behind() {
+fn external_messages_commit_above_the_region_and_leave_nothing_behind() {
     let mut session = Session::new(20, 6, 0);
+    session.region = vec!["job 1".into(), "job 2".into()];
     let prompt = FixedPrompt::new("~/project>", "");
 
     session.paint(&prompt, "some things!", "");
@@ -234,8 +255,8 @@ fn external_messages_commit_above_the_prompt_and_leave_nothing_behind() {
 
     // The prompt and buffer wrap at 20 columns onto a second row.
     assert_eq!(
-        session.screen.rows()[..4],
-        ["msg", "~/project>some thing", "s!", ""]
+        session.screen.rows()[..5],
+        ["msg", "job 1", "job 2", "~/project>some thing", "s!"]
     );
     assert_eq!(
         session.painter.prompt_start_row,
@@ -264,20 +285,21 @@ fn a_wrapped_external_message_pushes_the_prompt_below_its_rows() {
 }
 
 // Messages arriving at the bottom of the screen scroll the earlier ones into
-// history in order, and the prompt never does.
+// history in order, and the region never reaches scrollback.
 #[test]
-fn external_messages_at_the_bottom_scroll_into_history_in_order() {
+fn external_messages_at_the_bottom_scroll_into_history_without_the_region() {
     let mut session = Session::new(20, 4, 1);
     session.painter.bottom_confirmed_at = Some(4);
+    session.region = vec!["job".into()];
     let prompt = FixedPrompt::new("> ", "");
 
     session.paint(&prompt, "", "");
-    for msg in ["m1", "m2", "m3", "m4", "m5"] {
+    for msg in ["m1", "m2", "m3", "m4"] {
         session.commit(&[msg]);
         session.paint(&prompt, "", "");
     }
 
-    assert_eq!(session.history(), ["", "m1", "m2", "m3", "m4", "m5", ">"]);
+    assert_eq!(session.history(), ["", "m1", "m2", "m3", "m4", "job", ">"]);
 }
 
 // As above with the indicator folded into the left prompt. `prompt_height`

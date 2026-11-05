@@ -227,6 +227,30 @@ impl Cursor {
         }
     }
 
+    /// The smallest cursor covering both `self` and `other`, whether or not
+    /// they touch. Backward only when both are backward; a point counts as
+    /// forward, so mixing it with a backward cursor yields a forward one.
+    /// Symmetric. Whether two cursors should be combined at all is
+    /// [`overlaps`](Self::overlaps)'s question, not this one's.
+    pub fn hull(self, other: Self) -> Self {
+        let start = self.start().min(other.start());
+        let end = self.end().max(other.end());
+
+        match (self.direction(), other.direction()) {
+            (Direction::Backward, Direction::Backward) => Self::new(end, start),
+            _ => Self::new(start, end),
+        }
+    }
+
+    /// `true` if the two cursors share any text, or are points at the same
+    /// position. Ranges are half-open, so cursors that merely touch do not
+    /// overlap: adjacent ranges and a point at a range's end stay separate,
+    /// while a point at a range's start is absorbed. Symmetric; direction
+    /// is ignored.
+    pub fn overlaps(self, other: Self) -> bool {
+        self.start() == other.start() || (self.end() > other.start() && other.end() > self.start())
+    }
+
     /// `true` if `pos` lies inside the range (left-inclusive, right-exclusive).
     pub fn contains(&self, pos: usize) -> bool {
         self.start() <= pos && pos < self.end()
@@ -302,6 +326,8 @@ impl Default for Cursor {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -716,5 +742,101 @@ mod tests {
         let c = Cursor::new(3, 5).extend_span("café", 0, CaretGeometry::Block);
         assert_eq!(c, Cursor::new(5, 0));
         assert!(c.contains(3) && c.contains(4)); // both bytes of é covered
+    }
+
+    #[rstest]
+    fn hull_is_symmetric(
+        #[values(
+            Cursor::new(0, 3),
+            Cursor::new(3, 0),
+            Cursor::new(2, 2),
+            Cursor::new(1, 4)
+        )]
+        a: Cursor,
+        #[values(
+            Cursor::new(0, 3),
+            Cursor::new(3, 0),
+            Cursor::new(2, 2),
+            Cursor::new(1, 4)
+        )]
+        b: Cursor,
+    ) {
+        assert_eq!(a.hull(b), b.hull(a));
+    }
+
+    #[rstest]
+    fn hull_is_idempotent(
+        #[values(
+            Cursor::new(0, 3),
+            Cursor::new(3, 0),
+            Cursor::new(2, 2),
+            Cursor::new(1, 4)
+        )]
+        a: Cursor,
+    ) {
+        assert_eq!(a.hull(a), a);
+    }
+
+    #[rstest]
+    fn hull_covers_exactly_both(
+        #[values(
+            Cursor::new(0, 3),
+            Cursor::new(3, 0),
+            Cursor::new(2, 2),
+            Cursor::new(1, 4)
+        )]
+        a: Cursor,
+        #[values(
+            Cursor::new(0, 3),
+            Cursor::new(3, 0),
+            Cursor::new(2, 2),
+            Cursor::new(1, 4)
+        )]
+        b: Cursor,
+    ) {
+        let hull = a.hull(b);
+        assert_eq!(hull.start(), a.start().min(b.start()));
+        assert_eq!(hull.end(), a.end().max(b.end()));
+    }
+
+    #[rstest]
+    #[case(Cursor::new(0, 3), Cursor::new(2, 5), Cursor::new(0, 5))] // both forward
+    #[case(Cursor::new(3, 0), Cursor::new(5, 2), Cursor::new(5, 0))] // both backward
+    #[case(Cursor::new(3, 0), Cursor::new(2, 5), Cursor::new(0, 5))] // mixed goes forward
+    #[case(Cursor::new(3, 0), Cursor::new(1, 1), Cursor::new(0, 3))] // point + backward goes forward
+    #[case(Cursor::new(0, 2), Cursor::new(4, 6), Cursor::new(0, 6))] // disjoint still spans
+    #[case(Cursor::new(0, 5), Cursor::new(2, 3), Cursor::new(0, 5))] // contained
+    fn hull_follows_the_table(#[case] a: Cursor, #[case] b: Cursor, #[case] expected: Cursor) {
+        assert_eq!(a.hull(b), expected);
+        assert_eq!(b.hull(a), expected);
+    }
+
+    #[rstest]
+    #[case(Cursor::new(2, 2), Cursor::new(2, 2), true)] // same-position points
+    #[case(Cursor::new(1, 1), Cursor::new(2, 2), false)] // distinct points
+    #[case(Cursor::new(0, 5), Cursor::new(2, 2), true)] // point inside range
+    #[case(Cursor::new(2, 5), Cursor::new(2, 2), true)] // point at range start
+    #[case(Cursor::new(0, 3), Cursor::new(3, 3), false)] // point at range end
+    #[case(Cursor::new(0, 3), Cursor::new(3, 5), false)] // adjacent ranges
+    #[case(Cursor::new(0, 3), Cursor::new(2, 5), true)] // partial overlap
+    #[case(Cursor::new(0, 5), Cursor::new(2, 3), true)] // contained
+    #[case(Cursor::new(0, 2), Cursor::new(4, 6), false)] // disjoint
+    #[case(Cursor::new(3, 0), Cursor::new(2, 5), true)] // direction ignored
+    fn overlaps_follows_the_table(#[case] a: Cursor, #[case] b: Cursor, #[case] expected: bool) {
+        assert_eq!(a.overlaps(b), expected);
+        assert_eq!(b.overlaps(a), expected);
+    }
+
+    #[rstest]
+    fn overlaps_itself(
+        #[values(
+            Cursor::new(0, 3),
+            Cursor::new(3, 0),
+            Cursor::new(2, 2),
+            Cursor::new(1, 4)
+        )]
+        a: Cursor,
+    ) {
+        assert!(a.overlaps(a));
     }
 }

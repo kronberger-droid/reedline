@@ -7,6 +7,7 @@ mod line;
 mod line_buffer;
 mod resolve;
 mod rest_policy;
+mod selection;
 mod word;
 
 #[cfg(feature = "system_clipboard")]

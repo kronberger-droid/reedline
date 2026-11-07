@@ -605,12 +605,9 @@ impl Editor {
     /// that move the cursor outside the command path (e.g. history navigation),
     /// which must still settle a vi-normal caret off the line end.
     pub(crate) fn commit_cursor(&mut self) {
-        let committed = commit(
-            self.line_buffer.get_buffer(),
-            self.line_buffer.cursor(),
-            self.edit_mode.rest_policy(),
-        );
-        self.line_buffer.set_cursor(committed);
+        let policy = self.edit_mode.rest_policy();
+        self.line_buffer
+            .transform_cursors(|buf, c| commit(buf, c, policy));
         self.policy_unsettled = false;
     }
 
@@ -2390,6 +2387,28 @@ mod test {
         assert_eq!(editor.insertion_point(), 5);
         editor.set_edit_mode(PromptEditMode::Vi(PromptViMode::Normal));
         assert_eq!(editor.insertion_point(), 4);
+    }
+
+    #[test]
+    fn commit_cursor_settles_every_cursor() {
+        use crate::core_editor::selection::Selection;
+
+        // Vi normal never rests a bare caret past the last grapheme of its
+        // line. The secondary sits exactly there, at the end of the first
+        // line, and the commit pulls it back onto `b` just as it would the
+        // primary. The primary itself is already at rest and stays.
+        let mut editor = vi_editor("ab\ncd", PromptViMode::Normal);
+        editor
+            .line_buffer
+            .set_selection(Selection::new(Cursor::point(0), [Cursor::point(2)]));
+
+        editor.commit_cursor();
+
+        assert_eq!(
+            editor.line_buffer.selection().ranges(),
+            [Cursor::point(0), Cursor::point(1)]
+        );
+        assert_eq!(editor.line_buffer.cursor(), Cursor::point(0));
     }
 
     #[test]

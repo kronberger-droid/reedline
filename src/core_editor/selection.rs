@@ -53,6 +53,22 @@ impl Selection {
             }
         }
     }
+
+    /// Applies `f` to every range and re-establishes the invariant: the
+    /// result is sorted and merged, and the primary is whichever range its
+    /// image ended up in. The one place the invariant is restored after
+    /// mutators have moved ranges freely.
+    pub fn transform(&mut self, mut f: impl FnMut(Cursor) -> Cursor) {
+        let mut ranges = std::mem::take(&mut self.ranges);
+        let primary = ranges.swap_remove(self.primary_index);
+        *self = Self::new(f(primary), ranges.into_iter().map(f))
+    }
+
+    /// Every range, sorted by start.
+    #[cfg(test)]
+    pub(crate) fn ranges(&self) -> &[Cursor] {
+        &self.ranges
+    }
 }
 
 impl Default for Selection {
@@ -157,5 +173,51 @@ mod tests {
         selection.map_others(1..7, 0);
         assert_eq!(selection.ranges, vec![c(2, 3), c(1, 3)]);
         assert_eq!(selection.primary(), c(2, 3));
+    }
+
+    #[test]
+    fn transform_is_a_no_op_for_the_identity() {
+        let before = Selection::new(c(5, 6), [c(0, 2), c(9, 12)]);
+        let mut after = before.clone();
+        after.transform(|cursor| cursor);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn transform_merges_ranges_that_come_to_overlap() {
+        // Pushing every head two to the right makes the point at 3 cover
+        // 3..5, which overlaps the primary's 4..8: they merge into one hull
+        // and the primary is that hull. The far point stays on its own.
+        let mut selection = Selection::new(c(4, 6), [c(3, 3), c(10, 10)]);
+        selection.transform(|cursor| cursor.move_head(cursor.head() + 2));
+        assert_eq!(selection.ranges(), [c(3, 8), c(10, 12)]);
+        assert_eq!(selection.primary(), c(3, 8));
+    }
+
+    #[test]
+    fn transform_resorts_and_the_primary_index_follows() {
+        // Mirroring around 10 reverses the order: the primary goes from the
+        // first slot to the last, and the index must follow it there.
+        let mut selection = Selection::new(c(2, 3), [c(5, 6), c(8, 9)]);
+        selection.transform(|cursor| Cursor::new(20 - cursor.head(), 20 - cursor.anchor()));
+        assert_eq!(selection.ranges(), [c(11, 12), c(14, 15), c(17, 18)]);
+        assert_eq!(selection.primary(), c(17, 18));
+        assert_eq!(selection.primary_index, 2);
+    }
+
+    #[rstest]
+    fn transform_with_an_idempotent_f_is_idempotent(
+        #[values(
+            Selection::new(c(0, 3), [c(5, 5)]),
+            Selection::new(c(3, 0), [c(2, 5), c(8, 8)]),
+            Selection::new(c(4, 4), [])
+        )]
+        selection: Selection,
+    ) {
+        let mut once = selection;
+        once.transform(Cursor::collapse);
+        let mut twice = once.clone();
+        twice.transform(Cursor::collapse);
+        assert_eq!(twice, once);
     }
 }

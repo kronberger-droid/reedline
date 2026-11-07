@@ -477,6 +477,28 @@ impl LineBuffer {
         self.selection.map_others(range, replacement.len());
     }
 
+    /// Runs `f` over every cursor with the buffer text and restores the sort
+    /// and merge invariant afterwards (see `Selection::transform`). The
+    /// commit boundary's seam: `Editor::commit_cursor` settles each cursor
+    /// under the mode's rest policy through this.
+    pub(crate) fn transform_cursors(&mut self, mut f: impl FnMut(&str, Cursor) -> Cursor) {
+        let lines = &self.lines;
+        self.selection.transform(|c| f(lines, c));
+    }
+
+    /// Every cursor. Test-only until something outside tests reads more
+    /// than the primary.
+    #[cfg(test)]
+    pub(crate) fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// Replaces every cursor. Test-only until a command creates cursors.
+    #[cfg(test)]
+    pub(crate) fn set_selection(&mut self, selection: Selection) {
+        self.selection = selection;
+    }
+
     /// Substitute text covered by `range` in the current line
     ///
     /// Safety: Does not change the insertion point/offset and is thus not unicode safe!

@@ -449,25 +449,13 @@ impl LineBuffer {
         self.set_head(0);
     }
 
-    /// Clear all contents between `start` and `end` and change insertion point if necessary.
-    ///
-    /// If the cursor is located between `start` and `end` it is adjusted to `start`.
-    /// If the cursor is located after `end` it is adjusted to stay at its current char boundary.
+    /// Clears `range` and maps the cursor through the deletion, anchor and
+    /// head alike (`Cursor::map_through`): positions inside the range
+    /// land on its start, positions after it shift left.
     pub fn clear_range_safe(&mut self, range: Range<usize>) {
-        let (start, end) = if range.start > range.end {
-            (range.end, range.start)
-        } else {
-            (range.start, range.end)
-        };
-        if self.cursor().head() <= start {
-            // No action necessary
-        } else if self.cursor().head() < end {
-            self.set_head(start);
-        } else {
-            // Insertion point after end
-            self.set_head(self.cursor().head() - (end - start));
-        }
-        self.clear_range(start..end);
+        let cursor = self.cursor().map_through(&range, 0);
+        self.set_cursor(cursor);
+        self.clear_range(range);
     }
 
     /// Clear text covered by `range` in the current line
@@ -2311,5 +2299,17 @@ mod test {
         #[case] expected: Range<usize>,
     ) {
         assert_eq!(to_range(bounds, 9), expected);
+    }
+
+    #[test]
+    fn clear_range_safe_maps_the_anchor_too() {
+        let mut buf = buffer_with("hello world");
+        // Anchor inside the span that goes, head past it. The head-only rule
+        // this replaced left the anchor at 7, on a byte that no longer exists.
+        buf.set_cursor(Cursor::new(7, 11));
+        buf.clear_range_safe(6..9);
+        assert_eq!(buf.get_buffer(), "hello ld");
+        assert_eq!(buf.cursor(), Cursor::new(6, 8));
+        buf.assert_valid();
     }
 }

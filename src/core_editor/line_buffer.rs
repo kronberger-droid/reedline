@@ -3,7 +3,9 @@ use {
         core_editor::{
             cursor::Cursor,
             graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
-            line, word,
+            line,
+            selection::Selection,
+            word,
         },
         enums::{Direction, WordEdge, WordKind},
     },
@@ -26,11 +28,13 @@ use {
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct LineBuffer {
     lines: String,
-    /// The cursor as a (possibly empty) range. An empty cursor (anchor == head)
-    /// is a plain insertion point; a wider one carries the active selection.
-    /// Single source of truth — the old `insertion_point` + `selection_anchor`
-    /// pair collapsed into this.
-    cursor: Cursor,
+    /// Every cursor in the buffer. Each is a (possibly empty) range: an empty
+    /// one (anchor == head) is a plain insertion point, a wider one carries a
+    /// selection. The accessors below ([`cursor`](Self::cursor),
+    /// [`insertion_point`](Self::insertion_point),
+    /// [`selection_anchor`](Self::selection_anchor), ...) answer for the
+    /// primary; nothing in this file creates a second cursor yet.
+    selection: Selection,
 }
 
 impl From<&str> for LineBuffer {
@@ -106,17 +110,18 @@ impl LineBuffer {
     /// anchor fixed. ([`Cursor::move_head`] alone would turn a point into a
     /// spurious selection.)
     fn set_head(&mut self, head: usize) {
-        self.cursor = if self.cursor.is_empty() {
+        let cursor = self.cursor();
+        self.set_cursor(if cursor.is_empty() {
             Cursor::point(head)
         } else {
-            self.cursor.move_head(head)
-        };
+            cursor.move_head(head)
+        });
     }
 
     /// Returns the cursor as a [`Cursor`] (anchor + head), reflecting any
     /// active selection.
     pub(crate) fn cursor(&self) -> Cursor {
-        self.cursor
+        self.selection.primary()
     }
 
     /// Sets the cursor to the given [`Cursor`]. An empty cursor (anchor == head)
@@ -125,27 +130,28 @@ impl LineBuffer {
     /// ## Unicode safety:
     /// Not checked, improper use may cause panics in following operations
     pub(crate) fn set_cursor(&mut self, cursor: Cursor) {
-        self.cursor = cursor;
+        self.selection.set_primary(cursor);
     }
 
     /// The current selection anchor, if any. `Some(pos)` while a selection is
     /// active; `None` otherwise.
     pub fn selection_anchor(&self) -> Option<usize> {
-        (!self.cursor.is_empty()).then(|| self.cursor.anchor())
+        let cursor = self.cursor();
+        (!cursor.is_empty()).then(|| cursor.anchor())
     }
 
     /// Sets the selection anchor without moving the cursor head.
     pub fn set_selection_anchor(&mut self, anchor: Option<usize>) {
-        let head = self.cursor.head();
-        self.cursor = match anchor {
+        let head = self.cursor().head();
+        self.set_cursor(match anchor {
             Some(anchor) => Cursor::new(anchor, head),
             None => Cursor::point(head),
-        };
+        });
     }
 
     /// Clears any active selection. The cursor head is unchanged.
     pub fn clear_selection(&mut self) {
-        self.cursor = Cursor::point(self.cursor.head());
+        self.set_cursor(Cursor::point(self.cursor().head()));
     }
 
     /// Collapse any selection to a zero-width point at the **caret** — the
@@ -158,7 +164,7 @@ impl LineBuffer {
     /// grapheme under the caret instead of overshooting into the selection. A
     /// no-op when the cursor is already a point.
     pub(crate) fn collapse_to_caret(&mut self) {
-        self.cursor = Cursor::point(self.insertion_point());
+        self.set_cursor(Cursor::point(self.insertion_point()));
     }
 
     /// The selected byte range, ascending, or `None` for a point cursor.
@@ -195,11 +201,11 @@ impl LineBuffer {
         // `select` on a point uses `move_head`, which plants the anchor at the
         // old head (the degenerate anchor) and so opens a selection — exactly
         // the old "plant anchor at insertion_point if none" behavior.
-        self.cursor = if select {
-            self.cursor.move_head(pos)
+        self.set_cursor(if select {
+            self.cursor().move_head(pos)
         } else {
             Cursor::point(pos)
-        };
+        });
     }
 
     /// Output the current line in the multiline buffer
@@ -217,14 +223,14 @@ impl LineBuffer {
     ///
     /// Zero-based index
     pub fn line(&self) -> usize {
-        self.lines[..self.cursor.head()].matches('\n').count()
+        self.lines[..self.cursor().head()].matches('\n').count()
     }
 
     /// Calculates the grapheme index in the line the cursor head is on.
     ///
     /// Zero-based index
     pub fn col(&self) -> usize {
-        self.lines[self.line_start_index()..self.cursor.head()]
+        self.lines[self.line_start_index()..self.cursor().head()]
             .grapheme_indices(true)
             .count()
     }
@@ -248,7 +254,7 @@ impl LineBuffer {
     ///
     /// Returns 0 for the first line. Pure accessor — does not mutate state.
     pub fn line_start_index(&self) -> usize {
-        line::start_of_line(&self.lines, self.cursor.head())
+        line::start_of_line(&self.lines, self.cursor().head())
     }
 
     /// Move the cursor before the first character of the line
@@ -297,17 +303,17 @@ impl LineBuffer {
     /// - end of buffer (`len()`)
     /// - `\n` or `\r\n` (on the first byte)
     pub fn find_current_line_end(&self) -> usize {
-        line::end_of_line(&self.lines, self.cursor.head())
+        line::end_of_line(&self.lines, self.cursor().head())
     }
 
     /// Cursor position *behind* the next unicode grapheme to the right
     pub fn grapheme_right_index(&self) -> usize {
-        self.grapheme_right_index_from_pos(self.cursor.head())
+        self.grapheme_right_index_from_pos(self.cursor().head())
     }
 
     /// Cursor position *in front of* the next unicode grapheme to the left
     pub fn grapheme_left_index(&self) -> usize {
-        self.grapheme_left_index_from_pos(self.cursor.head())
+        self.grapheme_left_index_from_pos(self.cursor().head())
     }
 
     /// Cursor position *behind* the next unicode grapheme to the right from the given position
@@ -325,28 +331,28 @@ impl LineBuffer {
     /// `*_index` scans collapsed into. Returns the bar boundary; these buffer
     /// edits work in gap (bar) terms, so caret geometry doesn't apply.
     fn word_boundary(&self, kind: WordKind, edge: WordEdge, direction: Direction) -> usize {
-        word::locate_word(&self.lines, self.cursor.head(), kind, edge, direction)
+        word::locate_word(&self.lines, self.cursor().head(), kind, edge, direction)
     }
 
     /// Returns true if cursor is at the end of the buffer with preceding whitespace.
     fn at_end_of_line_with_preceding_whitespace(&self) -> bool {
         !self.is_empty() // No point checking if empty
-        && self.cursor.head() == self.lines.len()
+        && self.cursor().head() == self.lines.len()
         && self.lines.chars().last().is_some_and(|c| c.is_whitespace())
     }
 
     /// Cursor position at the end of the current whitespace block.
     fn current_whitespace_end_index(&self) -> usize {
-        self.lines[self.cursor.head()..]
+        self.lines[self.cursor().head()..]
             .char_indices()
             .find(|(_, ch)| !ch.is_whitespace())
-            .map(|(i, _)| self.cursor.head() + i)
+            .map(|(i, _)| self.cursor().head() + i)
             .unwrap_or(self.lines.len())
     }
 
     /// Cursor position at the start of the current whitespace block.
     fn current_whitespace_start_index(&self) -> usize {
-        self.lines[..self.cursor.head()]
+        self.lines[..self.cursor().head()]
             .char_indices()
             .rev()
             .find(|(_, ch)| !ch.is_whitespace())
@@ -363,7 +369,7 @@ impl LineBuffer {
             let range_end = self.current_whitespace_end_index();
             Some(range_start..range_end)
         } else if self.at_end_of_line_with_preceding_whitespace() {
-            Some(range_start..self.cursor.head())
+            Some(range_start..self.cursor().head())
         } else {
             None
         }
@@ -381,7 +387,7 @@ impl LineBuffer {
 
     ///Insert a single character at the insertion point and move right
     pub fn insert_char(&mut self, c: char) {
-        self.lines.insert(self.cursor.head(), c);
+        self.lines.insert(self.cursor().head(), c);
         self.move_right();
     }
 
@@ -433,7 +439,7 @@ impl LineBuffer {
     /// Clear from the start of the buffer to the cursor.
     /// Keeps the cursor at the beginning of the line/buffer.
     pub fn clear_to_insertion_point(&mut self) {
-        self.clear_range(..self.cursor.head());
+        self.clear_range(..self.cursor().head());
         self.set_head(0);
     }
 
@@ -447,13 +453,13 @@ impl LineBuffer {
         } else {
             (range.start, range.end)
         };
-        if self.cursor.head() <= start {
+        if self.cursor().head() <= start {
             // No action necessary
-        } else if self.cursor.head() < end {
+        } else if self.cursor().head() < end {
             self.set_head(start);
         } else {
             // Insertion point after end
-            self.set_head(self.cursor.head() - (end - start));
+            self.set_head(self.cursor().head() - (end - start));
         }
         self.clear_range(start..end);
     }
@@ -480,7 +486,7 @@ impl LineBuffer {
 
     /// Checks to see if the current edit position is pointing to whitespace
     pub fn on_whitespace(&self) -> bool {
-        self.lines[self.cursor.head()..]
+        self.lines[self.cursor().head()..]
             .chars()
             .next()
             .map(char::is_whitespace)
@@ -489,12 +495,12 @@ impl LineBuffer {
 
     /// Get the grapheme immediately to the right of the cursor, if any
     pub fn grapheme_right(&self) -> &str {
-        &self.lines[self.cursor.head()..self.grapheme_right_index()]
+        &self.lines[self.cursor().head()..self.grapheme_right_index()]
     }
 
     /// Get the grapheme immediately to the left of the cursor, if any
     pub fn grapheme_left(&self) -> &str {
-        &self.lines[self.grapheme_left_index()..self.cursor.head()]
+        &self.lines[self.grapheme_left_index()..self.cursor().head()]
     }
 
     /// Gets the range of the word the current edit position is pointing to
@@ -526,7 +532,7 @@ impl LineBuffer {
     /// Range over the current line (the one the cursor head is on). See
     /// `line_range_at`.
     pub fn current_line_range(&self) -> Range<usize> {
-        self.line_range_at(self.cursor.head())
+        self.line_range_at(self.cursor().head())
     }
 
     /// Replaces the whole word under the cursor with `change` of it and moves
@@ -786,7 +792,7 @@ impl LineBuffer {
             self.set_head(index);
         }
 
-        self.cursor.head()
+        self.cursor().head()
     }
 
     /// Moves the insertion point before the next char to the right
@@ -796,7 +802,7 @@ impl LineBuffer {
             self.set_head(self.grapheme_left_index());
         }
 
-        self.cursor.head()
+        self.cursor().head()
     }
 
     /// Moves the insertion point until the next char to the left of offset
@@ -805,7 +811,7 @@ impl LineBuffer {
             self.set_head(index);
         }
 
-        self.cursor.head()
+        self.cursor().head()
     }
 
     /// Moves the insertion point before the next char to the left of offset
@@ -814,7 +820,7 @@ impl LineBuffer {
             self.set_head(index + c.len_utf8());
         }
 
-        self.cursor.head()
+        self.cursor().head()
     }
 
     /// Deletes until first character to the right of offset
@@ -871,7 +877,7 @@ impl LineBuffer {
         };
 
         // First try to find pair from current cursor position
-        find_range_between_pair_at_position(self.cursor.head()).or_else(|| {
+        find_range_between_pair_at_position(self.cursor().head()).or_else(|| {
             // Second try, if cursor is positioned just before an opening character,
             // treat it as being "inside" that pair and try from the next position
             self.grapheme_right()
@@ -901,7 +907,7 @@ impl LineBuffer {
 
         // Find the next opening character, including the current position
         let open_pair_index = if self.grapheme_right().starts_with(open_char) {
-            self.cursor.head()
+            self.cursor().head()
         } else {
             self.find_char_right(open_char, only_search_current_line)?
         };

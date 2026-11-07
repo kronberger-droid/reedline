@@ -1,11 +1,20 @@
 use crate::core_editor::Cursor;
 
+/// Every cursor in a buffer, with one of them marked primary.
+///
+/// Invariant, established by every constructor: `ranges` is never empty,
+/// sorted by start, with no two overlapping (see [`Cursor::overlaps`]), and
+/// `primary_index` is in bounds. Mutators that move a range may break the
+/// sort or merge order; restoring it after a command is the engine's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     ranges: Vec<Cursor>,
     primary_index: usize,
 }
 
 impl Selection {
+    /// Builds a selection from `primary` and any number of other cursors,
+    /// sorted and merged.
     pub fn new(primary: Cursor, cursors: impl IntoIterator<Item = Cursor>) -> Self {
         let mut cursors: Vec<Cursor> = cursors.into_iter().collect();
 
@@ -14,6 +23,28 @@ impl Selection {
             ranges: cursors,
             primary_index,
         }
+    }
+
+    /// A selection of just `cursor`.
+    pub fn single(cursor: Cursor) -> Self {
+        Self::new(cursor, [])
+    }
+
+    /// The primary cursor.
+    pub fn primary(&self) -> Cursor {
+        self.ranges[self.primary_index]
+    }
+
+    /// Replaces the primary cursor in place. Does not re-sort or merge.
+    pub fn set_primary(&mut self, cursor: Cursor) {
+        self.ranges[self.primary_index] = cursor;
+    }
+}
+
+impl Default for Selection {
+    /// A single point at the start of the buffer.
+    fn default() -> Self {
+        Self::single(Cursor::default())
     }
 }
 

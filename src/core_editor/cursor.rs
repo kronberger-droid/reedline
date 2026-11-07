@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::core_editor::graphemes::{next_grapheme_boundary, prev_grapheme_boundary};
 
 /// The direction a cursor extends in.
@@ -251,6 +253,18 @@ impl Cursor {
         self.start() == other.start() || (self.end() > other.start() && other.end() > self.start())
     }
 
+    /// The cursor after a splice replaced `splice` with `new_len` bytes.
+    /// Anchor and head map independently (see [`map_pos`]), so a cursor that
+    /// lay inside the splice collapses to a point at its start and direction
+    /// is otherwise kept. For the cursor that made the edit the mutator
+    /// decides; this is for the others.
+    pub fn map_through(self, splice: &Range<usize>, new_len: usize) -> Cursor {
+        Cursor::new(
+            map_pos(self.anchor, splice, new_len),
+            map_pos(self.head, splice, new_len),
+        )
+    }
+
     /// `true` if `pos` lies inside the range (left-inclusive, right-exclusive).
     pub fn contains(&self, pos: usize) -> bool {
         self.start() <= pos && pos < self.end()
@@ -321,6 +335,20 @@ impl Cursor {
 impl Default for Cursor {
     fn default() -> Self {
         Self::point(0)
+    }
+}
+
+/// Where `pos` ends up after `splice` was replaced by `new_len` bytes.
+/// Positions before or at the start stay (a cursor at an insertion point stays
+/// before the inserted text), positions inside clamp to the start (the text
+/// they sat in is gone, and the start is a known char boundary), positions at
+/// or past the end shift by the length difference.
+fn map_pos(pos: usize, splice: &Range<usize>, new_len: usize) -> usize {
+    let Range { start, end } = *splice;
+    match pos {
+        p if p <= start => p,
+        p if p < end => start,
+        p => p - (end - start) + new_len,
     }
 }
 
@@ -838,5 +866,76 @@ mod tests {
         a: Cursor,
     ) {
         assert!(a.overlaps(a));
+    }
+
+    #[rstest]
+    // insertion of 2 bytes at 3
+    #[case(2, 3..3, 2, 2)] // before
+    #[case(3, 3..3, 2, 3)] // at the insertion point stays before it
+    #[case(4, 3..3, 2, 6)] // after shifts
+    // deletion of [2, 5)
+    #[case(1, 2..5, 0, 1)] // before
+    #[case(2, 2..5, 0, 2)] // at the start
+    #[case(3, 2..5, 0, 2)] // inside clamps to the start
+    #[case(4, 2..5, 0, 2)] // inside clamps to the start
+    #[case(5, 2..5, 0, 2)] // at the end lands on the start
+    #[case(6, 2..5, 0, 3)] // after shifts left
+    // [0, 7) replaced by 8 bytes (`straße` to `STRASSE`)
+    #[case(0, 0..7, 8, 0)] // at the start
+    #[case(4, 0..7, 8, 0)] // inside clamps
+    #[case(7, 0..7, 8, 8)] // at the end moves with it
+    #[case(9, 0..7, 8, 10)] // after shifts right
+    // [2, 6) replaced by 1 byte
+    #[case(6, 2..6, 1, 3)] // at the end
+    #[case(8, 2..6, 1, 5)] // after
+    fn map_pos_follows_the_table(
+        #[case] pos: usize,
+        #[case] splice: Range<usize>,
+        #[case] new_len: usize,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(map_pos(pos, &splice, new_len), expected);
+    }
+
+    #[rstest]
+    #[case(Cursor::new(4, 8), 0..2, 0, Cursor::new(2, 6))] // deletion before shifts both ends
+    #[case(Cursor::new(4, 8), 1..1, 3, Cursor::new(7, 11))] // insertion before shifts both ends
+    #[case(Cursor::new(2, 5), 5..9, 0, Cursor::new(2, 5))] // splice after, touching the end
+    #[case(Cursor::new(2, 10), 4..6, 0, Cursor::new(2, 8))] // deletion inside shrinks
+    #[case(Cursor::new(2, 10), 4..6, 5, Cursor::new(2, 13))] // replacement inside grows
+    #[case(Cursor::new(4, 6), 2..8, 0, Cursor::new(2, 2))] // range inside the splice collapses
+    #[case(Cursor::new(4, 6), 2..8, 3, Cursor::new(2, 2))] // ... to the start, not the new end
+    #[case(Cursor::new(2, 6), 4..9, 0, Cursor::new(2, 4))] // head inside clamps, anchor stays
+    #[case(Cursor::new(6, 10), 4..8, 0, Cursor::new(4, 6))] // anchor inside clamps, head shifts
+    #[case(Cursor::new(3, 6), 3..3, 2, Cursor::new(3, 8))] // insertion at the start widens
+    #[case(Cursor::new(3, 6), 6..6, 2, Cursor::new(3, 6))] // insertion at the end is outside
+    fn map_through_follows_the_table(
+        #[case] cursor: Cursor,
+        #[case] splice: Range<usize>,
+        #[case] new_len: usize,
+        #[case] expected: Cursor,
+    ) {
+        assert_eq!(cursor.map_through(&splice, new_len), expected);
+    }
+
+    #[rstest]
+    fn map_through_commutes_with_flip(
+        #[values(
+            Cursor::new(4, 8),
+            Cursor::new(2, 10),
+            Cursor::new(4, 6),
+            Cursor::new(2, 6),
+            Cursor::new(6, 10)
+        )]
+        cursor: Cursor,
+        #[values(0..2, 4..6, 2..8, 4..9, 3..3)] splice: Range<usize>,
+        #[values(0, 3)] new_len: usize,
+    ) {
+        // Anchor and head map independently, so a backward cursor maps to the
+        // flipped image of its forward twin; a collapse is its own flip.
+        assert_eq!(
+            cursor.flip().map_through(&splice, new_len),
+            cursor.map_through(&splice, new_len).flip()
+        );
     }
 }

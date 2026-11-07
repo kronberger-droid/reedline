@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::core_editor::Cursor;
 
 /// Every cursor in a buffer, with one of them marked primary.
@@ -38,6 +40,18 @@ impl Selection {
     /// Replaces the primary cursor in place. Does not re-sort or merge.
     pub fn set_primary(&mut self, cursor: Cursor) {
         self.ranges[self.primary_index] = cursor;
+    }
+
+    /// Maps every range but the primary through a splice that replaced
+    /// `splice` with `new_len` bytes (see [`Cursor::map_through`]). The
+    /// primary is the mutator's to place. Does not re-sort or merge: a
+    /// secondary clamped onto the primary stays a separate range.
+    pub fn map_others(&mut self, splice: Range<usize>, new_len: usize) {
+        for (i, r) in self.ranges.iter_mut().enumerate() {
+            if i != self.primary_index {
+                *r = r.map_through(&splice, new_len)
+            }
+        }
     }
 }
 
@@ -115,5 +129,33 @@ mod tests {
         let selection = Selection::new(c(5, 6), [c(0, 1), c(5, 6)]);
         assert_eq!(selection.ranges, vec![c(0, 1), c(5, 6)]);
         assert_eq!(selection.primary_index, 1);
+    }
+
+    #[test]
+    fn map_others_leaves_the_primary_alone() {
+        let mut selection = Selection::new(c(5, 6), [c(0, 2), c(9, 12)]);
+
+        // A deletion before every range: the primary would have moved to
+        // (4, 5) if it were mapped.
+        selection.map_others(0..1, 0);
+        assert_eq!(selection.ranges, vec![c(0, 1), c(5, 6), c(8, 11)]);
+        assert_eq!(selection.primary(), c(5, 6));
+
+        // An insertion after the primary, inside the last range.
+        selection.map_others(10..10, 3);
+        assert_eq!(selection.ranges, vec![c(0, 1), c(5, 6), c(8, 14)]);
+        assert_eq!(selection.primary(), c(5, 6));
+    }
+
+    #[test]
+    fn map_others_may_leave_an_overlap() {
+        let mut selection = Selection::new(c(2, 3), [c(5, 9)]);
+
+        // The deletion covers the secondary's anchor, which clamps to 1, and
+        // its head shifts to 3: it now overlaps the untouched primary. Merging
+        // is the normalise step's job, not this one's.
+        selection.map_others(1..7, 0);
+        assert_eq!(selection.ranges, vec![c(2, 3), c(1, 3)]);
+        assert_eq!(selection.primary(), c(2, 3));
     }
 }

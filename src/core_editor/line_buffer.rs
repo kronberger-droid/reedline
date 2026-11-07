@@ -9,7 +9,10 @@ use {
         },
         enums::{Direction, WordEdge, WordKind},
     },
-    std::{convert::From, ops::Range},
+    std::{
+        convert::From,
+        ops::{Range, RangeBounds},
+    },
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -387,7 +390,8 @@ impl LineBuffer {
 
     ///Insert a single character at the insertion point and move right
     pub fn insert_char(&mut self, c: char) {
-        self.lines.insert(self.cursor().head(), c);
+        let p = self.cursor().head();
+        self.splice(p..p, c.encode_utf8(&mut [0; 4]));
         self.move_right();
     }
 
@@ -398,7 +402,8 @@ impl LineBuffer {
     /// ## Unicode safety:
     /// Does not validate the incoming string or the current cursor position
     pub fn insert_str(&mut self, string: &str) {
-        self.lines.insert_str(self.insertion_point(), string);
+        let p = self.insertion_point();
+        self.splice(p..p, string);
         self.set_head(self.insertion_point() + string.len());
     }
 
@@ -425,7 +430,8 @@ impl LineBuffer {
         // callers (`cut_from_end`) copy the slice from `insertion_point()`, so a
         // Block/selection cursor (head past the caret) would otherwise leave the
         // covered grapheme behind while reporting it as cut.
-        self.lines.truncate(self.insertion_point());
+        let caret = self.insertion_point();
+        self.splice(caret..self.len(), "");
     }
 
     /// Clear beginning at the cursor up to the end of the line.
@@ -469,9 +475,18 @@ impl LineBuffer {
     /// Safety: Does not change the insertion point/offset and is thus not unicode safe!
     pub(crate) fn clear_range<R>(&mut self, range: R)
     where
-        R: std::ops::RangeBounds<usize>,
+        R: RangeBounds<usize>,
     {
         self.replace_range(range, "");
+    }
+
+    /// The one range edit on `lines`: replaces `range` with `replacement` and
+    /// maps every other cursor through it. The primary is the caller's to
+    /// place. `clear` and `set_buffer` replace the whole string and reset
+    /// the cursor instead.
+    fn splice(&mut self, range: Range<usize>, replacement: &str) {
+        self.lines.replace_range(range.clone(), replacement);
+        self.selection.map_others(range, replacement.len());
     }
 
     /// Substitute text covered by `range` in the current line
@@ -479,9 +494,9 @@ impl LineBuffer {
     /// Safety: Does not change the insertion point/offset and is thus not unicode safe!
     pub fn replace_range<R>(&mut self, range: R, replace_with: &str)
     where
-        R: std::ops::RangeBounds<usize>,
+        R: RangeBounds<usize>,
     {
-        self.lines.replace_range(range, replace_with);
+        self.splice(to_range(range, self.len()), replace_with);
     }
 
     /// Checks to see if the current edit position is pointing to whitespace
@@ -1095,6 +1110,23 @@ impl LineBuffer {
 /// Match any sequence of characters that are considered a word boundary
 pub(crate) fn is_whitespace_str(s: &str) -> bool {
     s.chars().all(char::is_whitespace)
+}
+
+fn to_range(r: impl RangeBounds<usize>, len: usize) -> Range<usize> {
+    use std::ops::Bound;
+    let start = match r.start_bound() {
+        Bound::Included(&b) => b,
+        Bound::Excluded(&b) => b + 1,
+        Bound::Unbounded => 0,
+    };
+
+    let end = match r.end_bound() {
+        Bound::Included(&b) => b + 1,
+        Bound::Excluded(&b) => b,
+        Bound::Unbounded => len,
+    };
+
+    Range { start, end }
 }
 
 #[cfg(test)]
@@ -2266,5 +2298,18 @@ mod test {
         assert_eq!(line_buffer.get_buffer(), expected_buffer);
         assert_eq!(line_buffer.cursor(), Cursor::point(expected_position));
         line_buffer.assert_valid();
+    }
+
+    #[rstest]
+    #[case(2..5, 2..5)]
+    #[case(..5, 0..5)]
+    #[case(2.., 2..9)]
+    #[case(.., 0..9)]
+    #[case(2..=5, 2..6)]
+    fn to_range_resolves_every_bound(
+        #[case] bounds: impl RangeBounds<usize>,
+        #[case] expected: Range<usize>,
+    ) {
+        assert_eq!(to_range(bounds, 9), expected);
     }
 }

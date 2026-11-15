@@ -35,6 +35,7 @@ use {
         terminal_extensions::{
             bracketed_paste::BracketedPasteGuard,
             kitty::KittyProtocolGuard,
+            raw_mode,
             semantic_prompt::{Osc133ClickEventsMarkers, SemanticPromptMarkers},
             tty_mode::TtyModeGuard,
         },
@@ -57,7 +58,7 @@ use {
         io::Write,
         process::Command,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{fence, AtomicBool, Ordering},
             Arc,
         },
         time::Duration,
@@ -468,7 +469,7 @@ impl RepaintSignal {
 impl Drop for Reedline {
     fn drop(&mut self) {
         if self.cursor_shapes.is_some() {
-            let _ignore = terminal::enable_raw_mode();
+            let _ignore = raw_mode::enable();
             let mut stdout = std::io::stdout();
             let _ignore = stdout.queue(SetCursorStyle::DefaultUserShape);
             let _ignore = stdout.flush();
@@ -1289,7 +1290,7 @@ impl Reedline {
     /// Returns a [`std::io::Result`] in which the `Err` type is [`std::io::Result`]
     /// and the `Ok` variant wraps a [`Signal`] which handles user inputs.
     pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
-        terminal::enable_raw_mode()?;
+        raw_mode::enable()?;
         self.bracketed_paste.enter();
         self.kitty_protocol.enter();
 
@@ -1351,20 +1352,16 @@ impl Reedline {
     /// indefinitely, so external triggers (break signal, repaint signal,
     /// external printer, idle callback) are noticed while waiting for input.
     fn input_needs_polling(&self) -> bool {
-        #[allow(unused_mut)] // Dependent on feature flags
-        let mut poll = self.break_signal.is_some()
+        self.break_signal.is_some()
             || self
                 .repaint_signal
                 .as_ref()
-                .is_some_and(|sig| Arc::strong_count(&sig.flag) > 1);
-
-        {
-            poll |= self.external_printer.is_some();
-        }
-
-        poll |= self.idle_callback.is_some();
-
-        poll
+                .is_some_and(|sig| Arc::strong_count(&sig.flag) > 1)
+            || self
+                .external_printer
+                .as_ref()
+                .is_some_and(|printer| printer.needs_polling())
+            || self.idle_callback.is_some()
     }
 
     /// Reset the per-call state at the start of a `read_line`, before anything
@@ -1421,6 +1418,18 @@ impl Reedline {
                 }
             }
 
+            // Decide whether to poll before taking the repaint request. Nothing
+            // wakes a blocked read, so a request must not land between the take
+            // and the block. A handle count of 1 means every outside handle was
+            // dropped before this read, so none can request after the take. A
+            // higher count makes the loop poll and catch a later request on the
+            // next pass.
+            let needs_polling = self.input_needs_polling();
+            // `Arc::strong_count` is a relaxed load and dropping an `Arc` is a
+            // release decrement, so this fence makes a dropped handle's
+            // `request_repaint` visible to the take below.
+            fence(Ordering::Acquire);
+
             if self.take_repaint_request() {
                 self.repaint(prompt)?;
             }
@@ -1433,9 +1442,8 @@ impl Reedline {
                 }
             }
 
-            // Determine if we need to poll (non-blocking) or can block on input.
-            // We need polling if external_printer or idle_callback is configured,
-            // using the shared poll_interval for the timeout.
+            // A completion still in flight also forces polling, on top of
+            // `needs_polling`, so its result is picked up without a key press.
             let status = self.completer.poll_completion();
             // Anything BUT idle means work is in flight. We need to keep polling.
             let completer_pending = status != CompletionStatus::Idle;
@@ -1447,7 +1455,7 @@ impl Reedline {
             let mut events: Vec<Event> = vec![];
 
             if !self.immediately_accept {
-                if self.input_needs_polling() || completer_pending {
+                if needs_polling || completer_pending {
                     if event::poll(self.poll_interval)? {
                         events.push(crossterm::event::read()?);
                     }
@@ -3598,6 +3606,10 @@ impl Reedline {
     }
 
     /// Adds an external printer
+    ///
+    /// While [`read_line`](Self::read_line) waits for input it checks the
+    /// printer for text every [poll interval](Self::with_poll_interval), for as
+    /// long as [`ExternalOutput::needs_polling`] returns `true`.
     pub fn with_external_printer(mut self, printer: impl ExternalOutput + 'static) -> Self {
         self.external_printer = Some(Box::new(printer));
         self
@@ -3611,8 +3623,10 @@ impl Reedline {
     ///
     /// Common values are 33ms (~30fps) for UI updates or 100ms for less frequent tasks.
     ///
-    /// Note: This setting only takes effect when an external printer or idle callback
-    /// is configured. Without these features, Reedline blocks until input is received.
+    /// Note: This setting only takes effect while something needs polling: an
+    /// idle callback, a break signal, a live repaint handle, or an external
+    /// printer whose [`ExternalOutput::needs_polling`] returns `true`. Otherwise
+    /// Reedline blocks until input is received.
     ///
     /// # Example
     /// ```no_run
@@ -4340,11 +4354,7 @@ mod tests {
             let buffer = context.buffer();
             let point = context.insertion_point();
 
-            if open == close && Self::inside_unclosed_quote(buffer, point, open) {
-                return false;
-            }
-
-            true
+            !(open == close && Self::inside_unclosed_quote(buffer, point, open))
         }
     }
 
@@ -7018,6 +7028,65 @@ mod tests {
             reedline.input_needs_polling(),
             "a repaint handle must switch the loop to polling so requests are noticed"
         );
+    }
+
+    /// An external printer whose `needs_polling` answer the test sets.
+    struct SwitchablePrinter(Arc<AtomicBool>);
+
+    impl ExternalOutput for SwitchablePrinter {
+        fn drain(&mut self) -> io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn needs_polling(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn external_printer_polls_only_while_it_expects_text() {
+        let expects_text = Arc::new(AtomicBool::new(false));
+        let reedline =
+            Reedline::create().with_external_printer(SwitchablePrinter(Arc::clone(&expects_text)));
+        assert!(
+            !reedline.input_needs_polling(),
+            "a printer that expects no text must let the loop block on input"
+        );
+
+        expects_text.store(true, Ordering::Relaxed);
+        assert!(
+            reedline.input_needs_polling(),
+            "a printer that expects text must switch the loop to polling"
+        );
+    }
+
+    #[test]
+    fn channel_printer_keeps_polling() {
+        let reedline =
+            Reedline::create().with_external_printer(crate::ExternalPrinter::<String>::default());
+        assert!(
+            reedline.input_needs_polling(),
+            "a printer without its own answer must keep the loop polling"
+        );
+    }
+
+    #[test]
+    fn request_survives_the_last_handle_being_dropped() {
+        // The input loop reads the handle count, then takes the request, then
+        // blocks if the count was 1. This checks the state that order relies
+        // on: once the last handle has requested a repaint and dropped, the
+        // loop chooses to block and the request is still there to take. It
+        // does not drive the loop or exercise the race itself.
+        let mut reedline = Reedline::create();
+        let signal = reedline.repaint_signal();
+
+        std::thread::spawn(move || signal.request_repaint())
+            .join()
+            .expect("worker thread panicked");
+
+        assert!(!reedline.input_needs_polling());
+        assert!(reedline.take_repaint_request());
+        assert!(!reedline.take_repaint_request());
     }
 
     #[test]

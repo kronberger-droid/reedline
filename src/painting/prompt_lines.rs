@@ -31,6 +31,14 @@ pub(crate) struct PromptLines<'prompt> {
     /// from it so the painter can drop the footer alone when a menu needs
     /// its rows. Empty draws none.
     pub(crate) footer: Cow<'prompt, str>,
+    /// `Prompt::render_prompt_multiline_indicator`, as the prompt returns it.
+    /// The frame layout draws it after each newline of
+    /// [`Self::frame_buffer`].
+    pub(crate) continuation: Cow<'prompt, str>,
+    /// The buffer around the cursor with bare newlines, for the frame
+    /// layout, when `before_cursor` and `after_cursor` have the
+    /// continuation drawn into them. See [`Self::frame_buffer`].
+    pub(crate) bare_buffer: Option<(Cow<'prompt, str>, Cow<'prompt, str>)>,
 }
 
 impl<'prompt> PromptLines<'prompt> {
@@ -57,6 +65,7 @@ impl<'prompt> PromptLines<'prompt> {
         let after_cursor = coerce_crlf(after_cursor);
         let hint = coerce_crlf(hint);
         let right_prompt_on_last_line = prompt.right_prompt_on_last_line();
+        let continuation = prompt.render_prompt_multiline_indicator();
 
         Self {
             prompt_str_left,
@@ -69,6 +78,27 @@ impl<'prompt> PromptLines<'prompt> {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation,
+            bare_buffer: None,
+        }
+    }
+
+    /// Set the buffer the frame layout draws, rendered without the
+    /// continuation. See [`Self::frame_buffer`].
+    pub(crate) fn with_bare_buffer(mut self, before: &'prompt str, after: &'prompt str) -> Self {
+        self.bare_buffer = Some((coerce_crlf(before), coerce_crlf(after)));
+        self
+    }
+
+    /// The buffer before and after the cursor with bare newlines, for the
+    /// frame layout to put the continuation after.
+    ///
+    /// Without [`Self::with_bare_buffer`], `before_cursor` and `after_cursor`
+    /// themselves, as history search draws its match with no continuation.
+    pub(crate) fn frame_buffer(&self) -> (&str, &str) {
+        match &self.bare_buffer {
+            Some((before, after)) => (before, after),
+            None => (&self.before_cursor, &self.after_cursor),
         }
     }
 
@@ -414,6 +444,8 @@ mod tests {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation: Cow::Borrowed(""),
+            bare_buffer: None,
         };
 
         let pos = prompt_lines.cursor_pos(terminal_columns);
@@ -452,6 +484,8 @@ mod tests {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation: Cow::Borrowed(""),
+            bare_buffer: None,
         };
 
         assert_eq!(
@@ -498,6 +532,8 @@ mod tests {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation: Cow::Borrowed(""),
+            bare_buffer: None,
         };
 
         assert_eq!(
@@ -527,6 +563,8 @@ mod tests {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation: Cow::Borrowed(""),
+            bare_buffer: None,
         };
 
         assert_eq!(prompt_lines.prompt_height(20), expected);
@@ -544,6 +582,8 @@ mod tests {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation: Cow::Borrowed(""),
+            bare_buffer: None,
         }
         .with_status(status, use_ansi_coloring)
     }

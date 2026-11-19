@@ -921,3 +921,81 @@ fn a_paint_that_erases_first_leaves_nothing_behind(
     let paint = String::from_utf8_lossy(&session.painter.stdout.captured()[start..]).into_owned();
     assert!(paint.contains("\x1b[2;1H\x1b[J"), "{paint:?}");
 }
+
+// The frame painter. While it replaces the streaming painter, the streaming
+// one is the oracle: a paint through either must leave the same screen.
+
+/// `paint` through the streaming painter and through the frame, each from
+/// the same screen, and what each left: rows with scrollback, and cursor.
+fn both_painters(
+    output: &[&str],
+    (width, height): (u16, u16),
+    paint: &dyn Fn(&mut Session),
+) -> [(Vec<String>, (u16, u16)); 2] {
+    [false, true].map(|frames| {
+        let mut session = Session::after_output(width, height, output);
+        if frames {
+            session.painter.paint_frames_for_test();
+        }
+        paint(&mut session);
+        (session.history(), session.screen.cursor())
+    })
+}
+
+#[rstest::rstest]
+#[case::a_typed_line("> ", "", "hello", "")]
+#[case::the_cursor_mid_line("> ", "", "hel", "lo")]
+#[case::a_prompt_over_two_rows("~/dir\n", "> ", "ls", "")]
+#[case::a_line_that_wraps("> ", "", "abcdefghijklmn", "")]
+#[case::a_line_that_fills_the_width("> ", "", "abcdefgh", "")]
+#[case::a_buffer_over_two_rows("> ", "", "ab\ncd", "")]
+fn the_frame_leaves_the_screen_the_streaming_painter_does(
+    #[case] left: &'static str,
+    #[case] indicator: &'static str,
+    #[case] before: &str,
+    #[case] after: &str,
+) {
+    let prompt = FixedPrompt::new(left, indicator);
+    let [streaming, frame] = both_painters(&["out"], (10, 6), &|s| s.paint(&prompt, before, after));
+    assert_eq!(frame, streaming);
+}
+
+#[test]
+fn the_frame_draws_the_continuation_after_each_buffer_newline() {
+    let mut session = Session::after_output(20, 6, &["out"]);
+    session.painter.paint_frames_for_test();
+
+    session.paint(
+        &FixedPrompt::new("> ", "").with_multiline("::: "),
+        "ab\ncd",
+        "",
+    );
+
+    assert_eq!(session.screen.rows(), ["out", "> ab", "::: cd", "", "", ""]);
+    assert_eq!(session.screen.cursor(), (6, 2));
+}
+
+#[test]
+fn a_frame_growing_past_the_last_row_scrolls_by_what_it_lacks() {
+    let mut session = Session::after_output(10, 4, &["a", "b", "c"]);
+    session.painter.paint_frames_for_test();
+    let prompt = FixedPrompt::new("> ", "");
+
+    session.paint(&prompt, "x", "");
+    session.paint(&prompt, "x\ny", "");
+
+    assert_eq!(session.screen.rows(), ["b", "c", "> x", "y"]);
+    assert_eq!(session.screen.cursor(), (1, 3));
+    assert_eq!(session.history(), ["a", "b", "c", "> x", "y"]);
+}
+
+#[test]
+fn a_frame_taller_than_the_screen_shows_its_bottom_from_the_top_row() {
+    let mut session = Session::after_output(10, 3, &["out"]);
+    session.painter.paint_frames_for_test();
+
+    session.paint(&FixedPrompt::new("> ", ""), "1\n2\n3\n4\n5", "");
+
+    assert_eq!(session.screen.rows(), ["3", "4", "5"]);
+    assert_eq!(session.screen.cursor(), (1, 2));
+}

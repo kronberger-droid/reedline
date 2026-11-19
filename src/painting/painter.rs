@@ -646,6 +646,10 @@ pub struct Painter {
     /// How many times the terminal was asked where the cursor is.
     #[cfg(test)]
     cursor_queries: usize,
+    /// Whether paints go through the frame layout. A crate-internal switch
+    /// while the frame painter replaces the streaming one: it goes away with
+    /// the streaming painter.
+    paints_frames: bool,
 }
 
 impl Painter {
@@ -673,6 +677,7 @@ impl Painter {
             terminal_taken: None,
             #[cfg(test)]
             cursor_queries: 0,
+            paints_frames: false,
         }
     }
 
@@ -687,6 +692,13 @@ impl Painter {
     /// Without one, any host completer is assumed to take it whenever it runs.
     pub(crate) fn completers_report_taking_the_terminal(&self) -> bool {
         self.terminal_taken.is_some()
+    }
+
+    /// Whether paints go through the frame layout, which needs the buffer
+    /// rendered without its continuation (see
+    /// [`PromptLines::with_bare_buffer`]).
+    pub(crate) fn paints_frames(&self) -> bool {
+        self.paints_frames
     }
 
     /// Height of the current terminal window.
@@ -3441,6 +3453,8 @@ mod tests {
             exit_after_cursor: None,
             status: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            continuation: Cow::Borrowed(""),
+            bare_buffer: None,
         }
     }
 

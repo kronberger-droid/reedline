@@ -3434,6 +3434,11 @@ impl Reedline {
             use_ansi_coloring,
             self.painter.semantic_markers(),
         );
+        // The frame layout puts the continuation in itself, so that it takes
+        // no buffer index. Rendered only for it, as it costs a second pass.
+        let bare_buffer = self.painter.paints_frames().then(|| {
+            styled_text.render_buffer_around(cursor_position_in_buffer, use_ansi_coloring)
+        });
 
         // With only auto-pair closers after the cursor, as in `(gs|)`, a
         // hinter that continues the text before it hints from that text and
@@ -3522,6 +3527,12 @@ impl Reedline {
                 &after_cursor,
                 &hint,
             )
+        };
+        let lines = match &bare_buffer {
+            // Drawn in place of the closers, as above.
+            Some((before, _)) if hint_replaces_closers => lines.with_bare_buffer(before, ""),
+            Some((before, after)) => lines.with_bare_buffer(before, after),
+            None => lines,
         };
         // History search paints elsewhere, so only submit hides the status
         // line and the prompt footer here. Measured only with one to show,

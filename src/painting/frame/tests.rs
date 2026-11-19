@@ -6,6 +6,7 @@ mod builder;
 mod grid;
 mod layout;
 mod token;
+mod write;
 
 /// Each row's graphemes joined, escapes included.
 fn texts(frame: &Frame) -> Vec<String> {

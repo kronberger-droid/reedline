@@ -1,11 +1,13 @@
 //! The writer's output run through a terminal emulator: these assert on
-//! what reaches the screen, not on the bytes.
+//! what reaches the screen, not on the bytes. The room the writer needs is
+//! plain arithmetic, tested as such at the end.
 
 use crate::painting::frame::grid::Frame;
 use crate::painting::frame::layout::{layout, LayoutInput};
-use crate::painting::frame::write::write_frame;
+use crate::painting::frame::write::{make_room, write_frame, Room};
 use crate::painting::test_screen::TestScreen;
 use pretty_assertions::assert_eq;
+use rstest::rstest;
 
 /// A frame of `> ` and the buffer, the cursor between `before` and
 /// `after`, no continuation.
@@ -122,4 +124,32 @@ fn an_escape_is_sent_and_takes_no_column() {
     let screen = screen(b"", &frame("\x1b[31mab\x1b[0m", "c", 10), 0, 0, 10, 2);
     assert_eq!(screen.row(0), "> abc");
     assert_eq!(screen.cursor(), (4, 0));
+}
+
+/// How far the screen scrolls so `visible` rows fit from `anchor`, and
+/// where the anchor ends up: moved up by exactly the scroll, since the
+/// rows above it scroll with it.
+#[rstest]
+#[case::fits_with_rows_to_spare(2, 1, 5, 0, 2)]
+#[case::fits_exactly(3, 2, 5, 0, 3)]
+#[case::one_row_short_on_the_last_row(4, 2, 5, 1, 3)]
+#[case::a_frame_the_height_of_the_screen(3, 5, 5, 3, 0)]
+#[case::already_at_the_top(0, 5, 5, 0, 0)]
+// More than the screen holds is cut to the screen: the scroll stops once
+// the anchor reaches the top, rather than push blank rows into scrollback.
+#[case::more_than_the_screen_holds(2, 7, 5, 2, 0)]
+fn make_room_scrolls_just_enough_and_moves_the_anchor_with_it(
+    #[case] anchor: u16,
+    #[case] visible: u16,
+    #[case] height: u16,
+    #[case] scroll: u16,
+    #[case] anchor_after: u16,
+) {
+    assert_eq!(
+        make_room(anchor, visible, height),
+        Room {
+            scroll,
+            anchor: anchor_after,
+        }
+    );
 }

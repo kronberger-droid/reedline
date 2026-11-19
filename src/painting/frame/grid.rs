@@ -99,6 +99,16 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
+    /// Where the cursor goes.
+    pub(crate) fn cursor(&self) -> Position {
+        self.cursor
+    }
+
+    /// Rows the prompt draws on, wrapping included. At least 1.
+    pub(crate) fn prompt_rows(&self) -> u16 {
+        self.prompt_rows
+    }
+
     /// Rows the frame needs on screen: the length of `rows` as a `u16`.
     pub(crate) fn height(&self) -> u16 {
         u16::try_from(self.rows.len()).unwrap_or(u16::MAX)

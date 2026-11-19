@@ -96,6 +96,21 @@ debugged one by one.
   engine. Harmless in the frame (hint cells take no index), but the layout
   could own it like the buffer's.
 - `Room` has no doc of its own; `make_room`'s covers both fields.
+- **Right prompt in the last column (decide in E).** Daren's recording
+  (macOS, `ssh` to Windows, nu 0.117.1, two-row prompt with a right prompt)
+  shows the screen scrolling one row per keystroke once the prompt sits on
+  the bottom row: each paint leaves a copy of the first prompt row behind.
+  Seen with both painters. Lead, not confirmed: both place the right prompt
+  at `width - right_width` (`right_prompt_bounds`, v1's
+  `place_right_prompt`), so its row ends in the last column with a wrap
+  pending, and ConPTY between sshd and the shell mishandles that. zsh keeps
+  one column free for this (`ZLE_RPROMPT_INDENT`, default 1). To confirm,
+  ask Daren for: the same session with `$env.PROMPT_COMMAND_RIGHT = ""`;
+  the same prompt in Windows Terminal without ssh; and the bytes,
+  `script -q ~/rprompt.log ssh windows` on the Mac. If it holds,
+  `place_right_prompt` in the frame ends at `width - 1`, pinned with a
+  `TestScreen` case. Today's frame paints never draw a right prompt
+  (`frame_can_paint`), so they cannot show it yet.
 
 ## Not pushed
 

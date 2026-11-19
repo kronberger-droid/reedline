@@ -1,4 +1,5 @@
 pub(crate) mod bracketed_paste;
+pub(crate) mod input;
 pub(crate) mod kitty;
 pub mod semantic_prompt;
 pub(crate) mod tty_mode;

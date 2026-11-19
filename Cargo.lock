@@ -726,6 +726,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "signal-hook",
  "strip-ansi-escapes",
  "strum",
  "tempfile",

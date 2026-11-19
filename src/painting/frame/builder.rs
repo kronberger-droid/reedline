@@ -38,6 +38,20 @@ impl Builder {
         }
     }
 
+    /// The row the last grapheme was drawn on, before any wrap it owes.
+    /// Unlike [`Builder::position`], a filled row is still this row.
+    pub(super) fn row(&self) -> u16 {
+        self.row
+    }
+
+    pub(super) fn rows_drawn(&self) -> u16 {
+        if self.col == 0 && self.row != 0 {
+            self.row
+        } else {
+            self.row + 1
+        }
+    }
+
     /// Where the next grapheme would start, which is where a cursor placed
     /// now belongs.
     ///

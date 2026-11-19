@@ -6,6 +6,9 @@ use crate::Prompt;
 
 use super::utils::{escape_control, strip_ansi};
 
+/// The continuation drawn after each newline, styled, or none.
+type Continuation<'a> = Option<(&'a Style, &'a str)>;
+
 /// A representation of a buffer with styling, used for doing syntax highlighting
 #[derive(Clone)]
 pub struct StyledText {
@@ -80,46 +83,56 @@ impl StyledText {
         use_ansi_coloring: bool,
         semantic_markers: Option<&dyn SemanticPromptMarkers>,
     ) -> (String, String) {
+        let prompt_style = Style::new().fg(prompt.get_prompt_multiline_color());
+        let continuation = format_continuation(
+            &prompt.render_prompt_multiline_indicator(),
+            semantic_markers,
+        );
+        self.split_rendered(
+            insertion_point,
+            Some((&prompt_style, &continuation)),
+            use_ansi_coloring,
+        )
+    }
+
+    /// As [`StyledText::render_around_insertion_point`], with every newline
+    /// left bare: no continuation prompt and no semantic markers.
+    ///
+    /// For the frame layout, which draws the continuation itself, so that it
+    /// stays out of the buffer's grapheme count.
+    pub(crate) fn render_buffer_around(
+        &self,
+        insertion_point: usize,
+        use_ansi_coloring: bool,
+    ) -> (String, String) {
+        self.split_rendered(insertion_point, None, use_ansi_coloring)
+    }
+
+    /// Render the buffer split at `insertion_point`, with `continuation`
+    /// after each newline.
+    fn split_rendered(
+        &self,
+        insertion_point: usize,
+        continuation: Continuation<'_>,
+        use_ansi_coloring: bool,
+    ) -> (String, String) {
         let mut current_idx = 0;
         let mut left_string = String::new();
         let mut right_string = String::new();
 
-        let multiline_prompt = prompt.render_prompt_multiline_indicator();
-        let prompt_style = Style::new().fg(prompt.get_prompt_multiline_color());
-
         for pair in &self.buffer {
             if current_idx >= insertion_point {
-                right_string.push_str(&render_as_string(
-                    pair,
-                    &prompt_style,
-                    &multiline_prompt,
-                    semantic_markers,
-                ));
+                right_string.push_str(&render_pair(pair, continuation));
             } else if pair.1.len() + current_idx <= insertion_point {
-                left_string.push_str(&render_as_string(
-                    pair,
-                    &prompt_style,
-                    &multiline_prompt,
-                    semantic_markers,
-                ));
+                left_string.push_str(&render_pair(pair, continuation));
             } else if pair.1.len() + current_idx > insertion_point {
                 let offset = insertion_point - current_idx;
 
                 let left_side = pair.1[..offset].to_string();
                 let right_side = pair.1[offset..].to_string();
 
-                left_string.push_str(&render_as_string(
-                    &(pair.0, left_side),
-                    &prompt_style,
-                    &multiline_prompt,
-                    semantic_markers,
-                ));
-                right_string.push_str(&render_as_string(
-                    &(pair.0, right_side),
-                    &prompt_style,
-                    &multiline_prompt,
-                    semantic_markers,
-                ));
+                left_string.push_str(&render_pair(&(pair.0, left_side), continuation));
+                right_string.push_str(&render_pair(&(pair.0, right_side), continuation));
             }
             current_idx += pair.1.len();
         }
@@ -209,14 +222,21 @@ pub(crate) fn continue_hint_lines(
     hint.replace('\n', &continuation)
 }
 
+#[cfg(test)]
 fn render_as_string(
     renderable: &(Style, String),
     prompt_style: &Style,
     multiline_prompt: &str,
     semantic_markers: Option<&dyn SemanticPromptMarkers>,
 ) -> String {
+    let continuation = format_continuation(multiline_prompt, semantic_markers);
+    render_pair(renderable, Some((prompt_style, &continuation)))
+}
+
+/// Render one styled pair, with `continuation` in place of each newline, or
+/// the newline itself without one.
+fn render_pair(renderable: &(Style, String), continuation: Continuation<'_>) -> String {
     let mut rendered = String::new();
-    let formatted_multiline_prompt = format_continuation(multiline_prompt, semantic_markers);
 
     // `split` consumes the `\n`, so a terminator has no glyph left to carry the
     // style and a selection covering it paints nothing. Every piece but the last
@@ -250,7 +270,11 @@ fn render_as_string(
         }
 
         if terminated {
-            rendered.push_str(&prompt_style.paint(&formatted_multiline_prompt).to_string());
+            match continuation {
+                // Starts with the newline, see `format_continuation`.
+                Some((style, text)) => rendered.push_str(&style.paint(text).to_string()),
+                None => rendered.push('\n'),
+            }
         }
     }
     rendered
@@ -477,6 +501,21 @@ mod test {
                 format!("{}\n::: {}", style.paint(" "), style.paint(""))
             );
         }
+    }
+
+    #[rstest]
+    #[case::lf("ab\ncd")]
+    #[case::crlf("ab\r\ncd")]
+    fn the_buffer_alone_keeps_its_newlines_bare(#[case] text: &str) {
+        let styled = StyledText {
+            buffer: vec![(Style::new(), text.into())],
+        };
+        // The cursor after the newline, so the split leaves it whole.
+        let point = text.find('c').unwrap();
+        assert_eq!(
+            styled.render_buffer_around(point, false),
+            ("ab\n".to_string(), "cd".to_string())
+        );
     }
 
     #[test]

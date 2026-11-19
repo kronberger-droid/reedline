@@ -1182,6 +1182,17 @@ impl Painter {
         let reserved_status_rows = std::mem::take(&mut self.status_rows);
         let reserved_footer_rows = std::mem::take(&mut self.footer_rows);
 
+        // After the takes, so a frame paint consumes the rows too.
+        if self.frame_can_paint(lines, menu, reserved_status_rows, reserved_footer_rows) {
+            return self.repaint_frame(
+                prompt,
+                lines,
+                prompt_mode,
+                use_ansi_coloring,
+                cursor_config,
+            );
+        }
+
         // Reset any ANSI styling that may have been left by external commands
         // This ensures the prompt is not affected by previous output styling
         // Note: Attribute::Reset (SGR 0) resets all attributes including colors
@@ -2363,6 +2374,7 @@ impl Painter {
     }
 }
 
+mod frame;
 #[cfg(test)]
 mod screen_tests;
 

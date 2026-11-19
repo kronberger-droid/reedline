@@ -8,9 +8,49 @@
 
 use nu_ansi_term::Style;
 
-use crate::painting::frame::{layout, make_room, write_frame, LayoutInput};
+use crate::painting::frame::{layout, make_room, write_frame, Frame, LayoutInput};
 
 use super::*;
+
+/// The prompt's own parts as the layout draws them, colored while coloring
+/// is on. Escapes stay in the strings: the layout keeps each where it was
+/// written, and `write_frame` sends it with its row.
+struct PromptParts {
+    left: String,
+    indicator: String,
+    continuation: String,
+}
+
+impl PromptParts {
+    /// Colored as the streaming painter colors them: the left prompt and the
+    /// indicator each in their color, reset before the buffer, and the
+    /// continuation in the multiline color.
+    fn new(prompt: &dyn Prompt, lines: &PromptLines, use_ansi_coloring: bool) -> Self {
+        if !use_ansi_coloring {
+            return Self {
+                left: lines.prompt_str_left.to_string(),
+                indicator: lines.prompt_indicator.to_string(),
+                continuation: lines.continuation.to_string(),
+            };
+        }
+        Self {
+            left: format!(
+                "{}{}",
+                prompt.get_prompt_color().prefix(),
+                lines.prompt_str_left
+            ),
+            indicator: format!(
+                "{}{}\x1b[0m",
+                prompt.get_indicator_color().prefix(),
+                lines.prompt_indicator
+            ),
+            continuation: Style::new()
+                .fg(prompt.get_prompt_multiline_color())
+                .paint(&*lines.continuation)
+                .to_string(),
+        }
+    }
+}
 
 impl Painter {
     /// Whether this paint can go through the frame layout, which draws the
@@ -43,37 +83,12 @@ impl Painter {
         self.stdout.queue(SetAttribute(Attribute::Reset))?;
         self.hide_cursor()?;
 
-        // Escapes stay in the strings: the layout keeps each where it was
-        // written, and `write_frame` sends it with its row.
-        let (left, indicator, continuation) = if use_ansi_coloring {
-            (
-                format!(
-                    "{}{}",
-                    prompt.get_prompt_color().prefix(),
-                    lines.prompt_str_left
-                ),
-                format!(
-                    "{}{}\x1b[0m",
-                    prompt.get_indicator_color().prefix(),
-                    lines.prompt_indicator
-                ),
-                Style::new()
-                    .fg(prompt.get_prompt_multiline_color())
-                    .paint(&*lines.continuation)
-                    .to_string(),
-            )
-        } else {
-            (
-                lines.prompt_str_left.to_string(),
-                lines.prompt_indicator.to_string(),
-                lines.continuation.to_string(),
-            )
-        };
+        let parts = PromptParts::new(prompt, lines, use_ansi_coloring);
         let (before, after) = lines.frame_buffer();
         let input = LayoutInput {
-            prompt_left: &left,
-            indicator: &indicator,
-            continuation: &continuation,
+            prompt_left: &parts.left,
+            indicator: &parts.indicator,
+            continuation: &parts.continuation,
             before,
             after,
             hint: lines.hint,
@@ -116,20 +131,7 @@ impl Painter {
             self.prompt_start_row.mark_verified(room.anchor);
 
             write_frame(&frame, top, room.anchor, width, height, &mut self.stdout)?;
-
-            // What the exit and suspend paths read, as `repaint_buffer`
-            // records it.
-            self.last_required_lines = frame.height();
-            self.large_buffer = frame.height() > height;
-            self.exit_right_prompt = None;
-            // Click mapping reads the streaming layout, which a frame paint
-            // does not make: clicks do nothing until it reads the frame.
-            self.last_layout = None;
-            let after_cursor = lines
-                .exit_after_cursor
-                .as_ref()
-                .unwrap_or(&lines.after_cursor);
-            self.after_cursor_lines = (!after_cursor.is_empty()).then(|| after_cursor.to_string());
+            self.record_frame_exit(&frame, lines, height);
 
             let shape = cursor_config
                 .as_ref()
@@ -145,9 +147,66 @@ impl Painter {
         painted.and(ended)
     }
 
+    /// Keep what the exit and suspend paths read after a frame paint, as
+    /// `repaint_buffer` keeps it after its own.
+    fn record_frame_exit(&mut self, frame: &Frame, lines: &PromptLines, height: u16) {
+        self.last_required_lines = frame.height();
+        self.large_buffer = frame.height() > height;
+        // No right prompt reaches a frame paint yet.
+        self.exit_right_prompt = None;
+        // Click mapping reads the streaming layout, which a frame paint does
+        // not make: clicks do nothing until it reads the frame.
+        self.last_layout = None;
+        let after_cursor = lines
+            .exit_after_cursor
+            .as_ref()
+            .unwrap_or(&lines.after_cursor);
+        self.after_cursor_lines = (!after_cursor.is_empty()).then(|| after_cursor.to_string());
+    }
+
     /// Paint through the frame layout where it can.
     #[cfg(test)]
     pub(crate) fn paint_frames_for_test(&mut self) {
         self.paints_frames = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DefaultPrompt;
+    use pretty_assertions::assert_eq;
+
+    fn parts(use_ansi_coloring: bool) -> PromptParts {
+        let prompt = DefaultPrompt::default();
+        let lines = PromptLines::new(&prompt, PromptEditMode::Default, None, "", "", "");
+        PromptParts::new(&prompt, &lines, use_ansi_coloring)
+    }
+
+    #[test]
+    fn without_coloring_the_parts_are_the_prompts_own() {
+        let prompt = DefaultPrompt::default();
+        let lines = PromptLines::new(&prompt, PromptEditMode::Default, None, "", "", "");
+        let parts = parts(false);
+        assert_eq!(parts.left, lines.prompt_str_left);
+        assert_eq!(parts.indicator, lines.prompt_indicator);
+        assert_eq!(parts.continuation, lines.continuation);
+    }
+
+    #[test]
+    fn with_coloring_each_part_opens_its_color_and_the_indicator_resets() {
+        let prompt = DefaultPrompt::default();
+        let parts = parts(true);
+        assert!(parts
+            .left
+            .starts_with(&prompt.get_prompt_color().prefix().to_string()));
+        assert!(parts
+            .indicator
+            .starts_with(&prompt.get_indicator_color().prefix().to_string()));
+        // The buffer after it is drawn in its own style, not the prompt's.
+        assert!(parts.indicator.ends_with("\x1b[0m"));
+        assert!(parts
+            .continuation
+            .starts_with(&prompt.get_prompt_multiline_color().prefix().to_string()));
     }
 }

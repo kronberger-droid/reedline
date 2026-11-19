@@ -1,20 +1,8 @@
+use super::{indices, texts};
 use crate::painting::frame::builder::Builder;
-use crate::painting::frame::grid::{Frame, Position, Row};
+use crate::painting::frame::grid::{Frame, Position};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-
-/// Each row's graphemes joined, escapes included.
-fn texts(frame: &Frame) -> Vec<String> {
-    frame
-        .rows
-        .iter()
-        .map(|row| row.cells.iter().map(|c| c.grapheme.as_str()).collect())
-        .collect()
-}
-
-fn indices(row: &Row) -> Vec<Option<usize>> {
-    row.cells.iter().map(|c| c.index).collect()
-}
 
 /// `text` put as prompt text into a builder of width 4, then the frame
 /// with the cursor wherever the walk stopped.
@@ -105,6 +93,23 @@ fn an_escape_stays_in_place_at_no_width_and_takes_no_index() {
 fn an_escape_does_not_count_toward_the_wrap() {
     // Four glyphs fill the row; the escape between them takes no column.
     assert_eq!(texts(&build("ab\x1b[1mcde")), ["ab\x1b[1mcd", "e"]);
+}
+
+/// Rows the walk has drawn on. Only a newline nothing followed gives its
+/// row away, to whatever is put next.
+#[rstest]
+#[case::nothing("", 1)]
+#[case::one_row("a", 1)]
+#[case::a_trailing_newline("a\n", 1)]
+#[case::only_a_newline("\n", 1)]
+#[case::a_blank_row_then_a_newline("\n\n", 2)]
+#[case::two_rows("a\nb", 2)]
+#[case::a_filled_row("abcd", 1)]
+#[case::a_wrapped_row("abcde", 2)]
+fn rows_drawn_leaves_out_the_row_a_last_newline_opened(#[case] text: &str, #[case] expected: u16) {
+    let mut builder = Builder::new(4);
+    builder.put(text, None);
+    assert_eq!(builder.rows_drawn(), expected);
 }
 
 #[test]

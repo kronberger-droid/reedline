@@ -999,3 +999,63 @@ fn a_frame_taller_than_the_screen_shows_its_bottom_from_the_top_row() {
     assert_eq!(session.screen.rows(), ["3", "4", "5"]);
     assert_eq!(session.screen.cursor(), (1, 2));
 }
+
+/// `A` starts a fresh line, so it goes out once per prompt: through ConPTY it
+/// can reach the terminal before the move to column 0, and on the bottom row
+/// the fresh line scrolls. Repaints mark the prompt with `P`, which does not
+/// move the cursor. A new prompt, a resize, an external message or a
+/// re-anchor to another row sends `A` again, for the row the prompt is on now.
+#[test]
+fn the_full_prompt_start_goes_out_once_per_prompt() {
+    let mut session = Session::new(20, 10, 3);
+    session
+        .painter
+        .set_semantic_markers(Some(crate::Osc133Markers::boxed()));
+    let prompt = FixedPrompt::new("> ", "");
+    let full_starts_in = |session: &mut Session, step: &dyn Fn(&mut Session)| {
+        let before = session.painter.stdout.captured().len();
+        step(session);
+        let emitted = String::from_utf8_lossy(&session.painter.stdout.captured()[before..]);
+        emitted.matches("133;A").count()
+    };
+
+    assert_eq!(
+        full_starts_in(&mut session, &|s| s.paint(&prompt, "a", "")),
+        1
+    );
+    // Keystrokes, and an idle callback that leaves the anchor to re-check.
+    let keystrokes = full_starts_in(&mut session, &|s| {
+        s.paint(&prompt, "ab", "");
+        s.painter.invalidate_prompt_start_row();
+        s.paint(&prompt, "abc", "");
+    });
+    assert_eq!(keystrokes, 0);
+    // An idle callback that scrolled: the prompt redraws on another row.
+    let after_scroll = full_starts_in(&mut session, &|s| {
+        s.host_output(b"\x1b[2S\x1b[2;1H");
+        s.painter.invalidate_prompt_start_row();
+        s.paint(&prompt, "abc", "");
+    });
+    assert_eq!(after_scroll, 1);
+    assert_eq!(
+        session.painter.prompt_start_row,
+        PromptStartRow::Verified(1)
+    );
+    let after_message = full_starts_in(&mut session, &|s| {
+        s.commit(&["message"]);
+        s.paint(&prompt, "abc", "");
+    });
+    assert_eq!(after_message, 1);
+    let after_resize = full_starts_in(&mut session, &|s| {
+        s.painter.handle_resize(20, 10);
+        s.paint(&prompt, "abc", "");
+    });
+    assert_eq!(after_resize, 1);
+    let next_prompt = full_starts_in(&mut session, &|s| {
+        s.painter
+            .initialize_prompt_position_with_size((20, 10), None)
+            .expect("anchoring the next prompt failed");
+        s.paint(&prompt, "", "");
+    });
+    assert_eq!(next_prompt, 1);
+}

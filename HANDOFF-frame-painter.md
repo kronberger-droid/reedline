@@ -125,6 +125,13 @@ could not see it. Before the semantic markers region (Next, step 4):
   separate from any frame cache. Change it only on events that move or
   wipe the mark, never when the cache is lost. v1 re-sent `A` from every
   `forget_frame`, so on every idle poll.
+- **The marker belongs to the rewrite of the prompt's cells.** A diffed
+  frame that leaves the prompt row alone sends no marker. One that rewrites
+  prompt cells sends one before them, since Ghostty tags each cell with
+  the semantic state the cursor has when it is written, and after `B`
+  that is input. The lifecycle above only picks which: `A` for a new or
+  moved prompt, `P` otherwise. Whatever the paint rewrote, the last marker
+  it sends is `B`, so the next keystroke's text counts as input.
 - **`write_frame` emits nothing that moves the cursor except its own
   moves.** List the exceptions and keep them off the per-paint path: `A`
   (fresh line), a cell in the last column (pending wrap), `\r\n`. A test

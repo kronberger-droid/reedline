@@ -3,7 +3,7 @@
 Working notes for `feat/frame-painter-v2`. Drop this file before the PR
 merges.
 
-State as of 2026-11-19, head `30dcc6e`, rebased onto `upstream/main`
+State as of 2026-11-20, head `2fe8f94`, rebased onto `upstream/main`
 (`f1d6069`, with the prompt footer from #1242).
 
 ## Decision: replace, not flag
@@ -96,21 +96,49 @@ debugged one by one.
   engine. Harmless in the frame (hint cells take no index), but the layout
   could own it like the buffer's.
 - `Room` has no doc of its own; `make_room`'s covers both fields.
-- **Right prompt in the last column (decide in E).** Daren's recording
-  (macOS, `ssh` to Windows, nu 0.117.1, two-row prompt with a right prompt)
-  shows the screen scrolling one row per keystroke once the prompt sits on
-  the bottom row: each paint leaves a copy of the first prompt row behind.
-  Seen with both painters. Lead, not confirmed: both place the right prompt
-  at `width - right_width` (`right_prompt_bounds`, v1's
-  `place_right_prompt`), so its row ends in the last column with a wrap
-  pending, and ConPTY between sshd and the shell mishandles that. zsh keeps
-  one column free for this (`ZLE_RPROMPT_INDENT`, default 1). To confirm,
-  ask Daren for: the same session with `$env.PROMPT_COMMAND_RIGHT = ""`;
-  the same prompt in Windows Terminal without ssh; and the bytes,
-  `script -q ~/rprompt.log ssh windows` on the Mac. If it holds,
-  `place_right_prompt` in the frame ends at `width - 1`, pinned with a
-  `TestScreen` case. Today's frame paints never draw a right prompt
-  (`frame_can_paint`), so they cannot show it yet.
+- **Prompt scroll over ssh to Windows: fix committed, not yet confirmed.**
+  Daren's recording (macOS, `ssh` to Windows, nu 0.117.1, two-row prompt
+  with a right prompt) scrolls one row per keystroke once the prompt sits
+  on the bottom row, leaving a copy of the first prompt row each paint.
+  Seen with both painters. Turning off `shell_integration.osc133` was the
+  only thing that changed it, which ruled out the right-prompt-in-the-last-
+  column lead. Cause, as far as we can tell: the painter sent OSC 133 `A`
+  on every paint. `A` starts a fresh line when the cursor is off column 0,
+  and ConPTY passes it through ahead of the cursor move written before it.
+  `2fe8f94` (and `1e8c302` on v1, #1299) sends `A` once per prompt and
+  `P;k=i` on repaints. Still open:
+  - Daren reruns with the fix. His `osc133` toggle also turned off mouse
+    click mode and the per-keystroke `B` and `P;k=r`. If the scroll
+    survives, those are next.
+  - Which terminal he uses on the Mac. Ghostty does a fresh-line on `A`,
+    Kitty does not. The bytes would settle it:
+    `script -q ~/rprompt.log ssh windows`.
+
+## Lessons from the OSC 133 bug
+
+v1's frame copied the streaming painter's per-paint `A`, and the tests
+could not see it. Before the semantic markers region (Next, step 4):
+
+- **Marks are terminal state, not cells.** `A` starts a fresh line, arms
+  `click_events` and leaves a mark on its row. Track "the terminal holds
+  the prompt mark on row R" in the painter (`prompt_marked` today),
+  separate from any frame cache. Change it only on events that move or
+  wipe the mark, never when the cache is lost. v1 re-sent `A` from every
+  `forget_frame`, so on every idle poll.
+- **`write_frame` emits nothing that moves the cursor except its own
+  moves.** List the exceptions and keep them off the per-paint path: `A`
+  (fresh line), a cell in the last column (pending wrap), `\r\n`. A test
+  that scans one paint's bytes for them is cheap.
+- **`both_painters` is the wrong oracle for markers.** It treats the
+  streaming painter as correct, and `vt100` drops OSC 133, so the test
+  screen never shows a fresh line from `A`. Test markers against the
+  protocol instead: one `A` per prompt, and the cursor in column 0 when
+  it arrives. Better, teach `TestScreen` OSC 133 (row marks and Ghostty's
+  fresh-line on `A`), so a stray scroll shows up as a screen diff.
+- **Seen with both painters means shared code.** Look at markers, the
+  `Prompt` trait and the prompt rendering before either painter's layout.
+  The right-prompt lead was a layout theory, and layout is what the two
+  painters do not share.
 
 ## Not pushed
 

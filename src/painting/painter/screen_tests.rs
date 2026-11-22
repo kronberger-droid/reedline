@@ -632,8 +632,9 @@ fn a_paint_that_reserves_nothing_draws_no_status_rows() {
     session.paint(&prompt, "pwd", "");
 
     assert_eq!(session.screen.rows()[1..3], ["> pwd", ""]);
-    let layout = session.painter.last_layout.as_ref().expect("painted");
-    assert_eq!(layout.status_start_row, None);
+    // The frame keeps no streaming layout, and so none with status rows.
+    let layout = session.painter.last_layout.as_ref();
+    assert_eq!(layout.and_then(|layout| layout.status_start_row), None);
     assert_eq!(session.painter.last_required_lines, 1);
 }
 
@@ -914,7 +915,10 @@ fn a_paint_that_erases_first_leaves_nothing_behind(
     let second: Paint = &|s| s.paint(&prompt, second, "");
     assert_nothing_left_over((10, 6), first, second);
 
+    // Erasing first is the streaming painter's way there. The frame writes
+    // each row whole and clears what is left of the old one after it.
     let mut session = Session::new(10, 6, 1);
+    session.painter.paint_streaming_for_test();
     first(&mut session);
     let start = session.painter.stdout.captured().len();
     second(&mut session);
@@ -934,8 +938,8 @@ fn both_painters(
 ) -> [(Vec<String>, (u16, u16)); 2] {
     [false, true].map(|frames| {
         let mut session = Session::after_output(width, height, output);
-        if frames {
-            session.painter.paint_frames_for_test();
+        if !frames {
+            session.painter.paint_streaming_for_test();
         }
         paint(&mut session);
         (session.history(), session.screen.cursor())
@@ -963,7 +967,6 @@ fn the_frame_leaves_the_screen_the_streaming_painter_does(
 #[test]
 fn the_frame_draws_the_continuation_after_each_buffer_newline() {
     let mut session = Session::after_output(20, 6, &["out"]);
-    session.painter.paint_frames_for_test();
 
     session.paint(
         &FixedPrompt::new("> ", "").with_multiline("::: "),
@@ -978,7 +981,6 @@ fn the_frame_draws_the_continuation_after_each_buffer_newline() {
 #[test]
 fn a_frame_growing_past_the_last_row_scrolls_by_what_it_lacks() {
     let mut session = Session::after_output(10, 4, &["a", "b", "c"]);
-    session.painter.paint_frames_for_test();
     let prompt = FixedPrompt::new("> ", "");
 
     session.paint(&prompt, "x", "");
@@ -992,7 +994,6 @@ fn a_frame_growing_past_the_last_row_scrolls_by_what_it_lacks() {
 #[test]
 fn a_frame_taller_than_the_screen_shows_its_bottom_from_the_top_row() {
     let mut session = Session::after_output(10, 3, &["out"]);
-    session.painter.paint_frames_for_test();
 
     session.paint(&FixedPrompt::new("> ", ""), "1\n2\n3\n4\n5", "");
 
@@ -1066,7 +1067,6 @@ fn after_a_resize_the_frame_draws_over_the_block_the_terminal_reflowed(
 #[test]
 fn after_a_resize_a_frame_taller_than_the_screen_scrolls_nothing() {
     let mut session = Session::new(10, 3, 0);
-    session.painter.paint_frames_for_test();
     session.host_output(b"out\r\n> 1\r\n2\r\n3\r\n4\r\n5");
 
     session.painter.handle_resize(10, 3);

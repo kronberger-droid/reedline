@@ -164,10 +164,11 @@ impl Painter {
         self.after_cursor_lines = (!after_cursor.is_empty()).then(|| after_cursor.to_string());
     }
 
-    /// Paint through the frame layout where it can.
+    /// Paint everything through the streaming painter, for the tests of its
+    /// own mechanics and the ones that compare the two. Goes away with it.
     #[cfg(test)]
-    pub(crate) fn paint_frames_for_test(&mut self) {
-        self.paints_frames = true;
+    pub(crate) fn paint_streaming_for_test(&mut self) {
+        self.paints_frames = false;
     }
 }
 

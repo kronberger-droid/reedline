@@ -682,7 +682,7 @@ impl Painter {
             terminal_taken: None,
             #[cfg(test)]
             cursor_queries: 0,
-            paints_frames: false,
+            paints_frames: true,
         }
     }
 
@@ -3655,7 +3655,7 @@ mod tests {
     /// at each end marker, which flickered on every keystroke (#1302).
     #[rstest]
     #[case::small_buffer("abc", false)]
-    #[case::large_buffer("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10", true)]
+    #[case::large_buffer("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11", true)]
     fn a_plain_paint_sends_no_frame_marker(#[case] before: &str, #[case] expect_large: bool) {
         let lines = make_lines("> ", "", "", before, "");
         let (out, _, large) = capture_repaint(&lines, 0);
@@ -3966,10 +3966,14 @@ mod tests {
         let (out, _reserved, large) = capture_repaint(&lines, 0);
         assert!(large, "meant to exercise the large-buffer path");
 
+        let mut screen = TestScreen::new(20, 10);
+        screen.feed(out.as_bytes());
+        assert_eq!(screen.row(0), "ab", "emitted {out:?}");
         assert!(
-            out.contains("ab\r\n> Z"),
-            "indicator and input landed on the prompt's row; emitted {out:?}"
+            screen.row(1).starts_with("> Zy"),
+            "indicator and input left the row below the prompt; emitted {out:?}"
         );
+        assert_eq!(screen.cursor(), (3, 1));
     }
 
     /// The right prompt saves and restores around its own `MoveTo`, and that

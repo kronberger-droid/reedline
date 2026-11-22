@@ -1000,6 +1000,70 @@ fn a_frame_taller_than_the_screen_shows_its_bottom_from_the_top_row() {
     assert_eq!(session.screen.cursor(), (1, 2));
 }
 
+/// After a resize the terminal has reflowed the block and reports only the
+/// row its cursor is on. The prompt starts as many rows above it as the frame
+/// lays out before the cursor at the new width, so the paint lands on the
+/// block the terminal shows and leaves no second copy of it.
+///
+/// `reflowed` is that block as the terminal left it, cursor included: the
+/// test screen cannot reflow, so the test starts after it.
+#[rstest::rstest]
+#[case::a_line_the_terminal_wrapped(
+    ("> ", ""),
+    ("abcdefghijklmn", ""),
+    "> abcdefghijklmn",
+    &["> abcdefgh", "ijklmn"]
+)]
+#[case::the_cursor_above_the_last_row(
+    ("> ", ""),
+    ("ab", "\ncd"),
+    "> ab\r\ncd\x1b[2;5H",
+    &["> ab", "cd"]
+)]
+#[case::a_prompt_over_two_rows(
+    ("~/dir\n", "> "),
+    ("ls", ""),
+    "~/dir\r\n> ls",
+    &["~/dir", "> ls"]
+)]
+fn after_a_resize_the_frame_draws_over_the_block_the_terminal_reflowed(
+    #[case] (left, indicator): (&'static str, &'static str),
+    #[case] (before, after): (&str, &str),
+    #[case] reflowed: &str,
+    #[case] block: &[&str],
+) {
+    let prompt = FixedPrompt::new(left, indicator);
+
+    let [streaming, frame] = both_painters(&["out"], (10, 6), &|s| {
+        s.host_output(reflowed.as_bytes());
+        s.painter.handle_resize(10, 6);
+        s.paint(&prompt, before, after);
+    });
+
+    assert_eq!(frame, streaming);
+    assert_eq!(frame.0, [&["out"], block].concat());
+}
+
+/// A shrink can leave the top of the block in scrollback. The frame then
+/// shows its bottom from the top row, as it does without a resize, and
+/// scrolls nothing more out.
+///
+/// Not compared with the streaming painter, which scrolls a row out on each
+/// paint of a buffer taller than the screen under an empty indicator.
+#[test]
+fn after_a_resize_a_frame_taller_than_the_screen_scrolls_nothing() {
+    let mut session = Session::new(10, 3, 0);
+    session.painter.paint_frames_for_test();
+    session.host_output(b"out\r\n> 1\r\n2\r\n3\r\n4\r\n5");
+
+    session.painter.handle_resize(10, 3);
+    session.paint(&FixedPrompt::new("> ", ""), "1\n2\n3\n4\n5", "");
+
+    assert_eq!(session.screen.rows(), ["3", "4", "5"]);
+    assert_eq!(session.screen.cursor(), (1, 2));
+    assert_eq!(session.history(), ["out", "> 1", "2", "3", "4", "5"]);
+}
+
 /// `A` starts a fresh line, so it goes out once per prompt: through ConPTY it
 /// can reach the terminal before the move to column 0, and on the bottom row
 /// the fresh line scrolls. Repaints mark the prompt with `P`, which does not

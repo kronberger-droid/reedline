@@ -9295,11 +9295,23 @@ mod tests {
             .with_hinter(Box::new(FixedHinter(hint)));
         // A capturing painter, anchored as `seam_engine` anchors its sink.
         rl.painter = Painter::new(W::capture());
+        // Sized, as a terminal is: only the rows that fit on it are drawn.
+        rl.painter.handle_resize(80, 24);
         rl.painter.force_prompt_anchored_for_test(0);
         rl.run_edit_commands(&[EditCommand::InsertString("echo ".into())]);
-        rl.repaint(&DefaultPrompt::default()).unwrap();
+        rl.repaint(&short_prompt()).unwrap();
         let painted = String::from_utf8_lossy(rl.painter.captured_for_test()).into_owned();
         (rl, painted)
+    }
+
+    /// A prompt of a few columns. The default one shows the working
+    /// directory, and a long one wraps the line a test looks for in the
+    /// painted bytes.
+    fn short_prompt() -> DefaultPrompt {
+        DefaultPrompt::new(
+            crate::DefaultPromptSegment::Basic(String::from("p")),
+            crate::DefaultPromptSegment::Empty,
+        )
     }
 
     #[test]
@@ -9335,14 +9347,15 @@ mod tests {
         let mut rl = Reedline::create()
             .with_ansi_colors(false)
             .with_hinter(Box::new(FixedHinter("a\nb")));
-        rl.painter = Painter::new(W::capture());
+        rl.painter = Painter::new(W::screen(40, 10));
         // Sized, or the painter takes every buffer for one too tall to show.
         rl.painter.handle_resize(40, 10);
         rl.painter.force_prompt_anchored_for_test(0);
         rl.run_edit_commands(&[EditCommand::InsertString("echo ".into())]);
-        rl.repaint(&DefaultPrompt::default()).unwrap();
-        let painted = String::from_utf8_lossy(rl.painter.captured_for_test()).into_owned();
-        assert!(painted.contains("a\r\n::: b"), "no indicator: {painted:?}");
+        rl.repaint(&short_prompt()).unwrap();
+        let rows = rl.painter.screen_rows_for_test();
+        assert!(rows[0].ends_with("echo a"), "no hint: {rows:?}");
+        assert_eq!(rows[1], "::: b");
 
         send(&mut rl, ReedlineEvent::HistoryHintComplete);
         assert_eq!(rl.current_buffer_contents(), "echo a\nb");
@@ -9543,8 +9556,10 @@ mod tests {
     /// What one repaint writes to the terminal.
     fn repaint_output(rl: &mut Reedline) -> String {
         rl.painter = Painter::new(W::capture());
+        // Sized, as a terminal is: only the rows that fit on it are drawn.
+        rl.painter.handle_resize(80, 24);
         rl.painter.force_prompt_anchored_for_test(0);
-        rl.repaint(&DefaultPrompt::default()).unwrap();
+        rl.repaint(&short_prompt()).unwrap();
         String::from_utf8_lossy(rl.painter.captured_for_test()).into_owned()
     }
 

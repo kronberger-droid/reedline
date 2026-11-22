@@ -3,8 +3,8 @@
 Working notes for `feat/frame-painter-v2`. Drop this file before the PR
 merges.
 
-State as of 2026-11-20, head `2fe8f94`, rebased onto `upstream/main`
-(`f1d6069`, with the prompt footer from #1242).
+State as of 2026-11-22, rebased onto `upstream/main` (`452867e`, with the
+terminal-taken signal from #1297).
 
 ## Decision: replace, not flag
 
@@ -50,7 +50,36 @@ No synchronized update of its own (#1302).
 
 Screen tests at the end of `painter/screen_tests.rs`. `both_painters` paints
 the same thing through both painters and compares rows, scrollback and
-cursor; six cases match.
+cursor; six cases match, and three more after a resize. The resize tests
+start from the block as the terminal reflowed it, since `TestScreen` cannot
+reflow.
+
+## Scope: parity on the merits
+
+No API redesign in this PR. Where the two painters differ, the one that is
+wrong gets fixed: a streaming painter bug goes to `main` as its own PR, so
+`both_painters` stays an honest oracle and the fix ships before the frame.
+
+## Where the streaming painter is wrong
+
+All three on a buffer taller than the screen, found with the resize tests.
+The frame is right in each, so tall-buffer tests assert on the frame alone.
+
+- **An empty indicator scrolls a row out on every paint.** `compute_layout`
+  counts `prompt_indicator.lines()`, which is 0 for `""`, so `extra_rows`
+  comes out one short and the paint emits one row too many. Prompt `"> "`,
+  no indicator, `1\n2\n3\n4\n5` on three rows: scrollback gains a `2` per
+  paint. Same family as the ignored
+  `large_buffer_of_one_wrapped_line_stays_on_screen`.
+- **A paint that jumps straight to a tall buffer draws over the host output
+  above it.** The large-buffer branch sets the anchor to row 0 and clears
+  from there. The frame scrolls those rows into scrollback first.
+- **A tall buffer ending in a newline loses its last row.** `lines()` drops
+  the trailing empty line: the screen shows `2 3 4` with the cursor on the
+  `4` row, where the frame shows `3 4` and the cursor on the empty row.
+
+Not decided: whether these are worth fixing in code this PR deletes. The
+first is a one-line fix; the other two go deeper into `print_large_buffer`.
 
 ## Settled along the way
 
@@ -77,18 +106,23 @@ debugged one by one.
 
 ## Next
 
-1. A resize screen test: `handle_resize`, then a paint through
-   `resolve_resize` with `top`.
-2. Work through the 10 failures above, then turn `paints_frames` on by
-   default.
+1. Done: the resize screen tests. `top` in the `resolve_resize` argument is
+   not pinned by them: the saturating subtraction gives the same anchor
+   without it unless the terminal's cursor sits lower than the frame expects.
+2. Work through the 10 failures above (counted before the rebase onto
+   #1297), then turn `paints_frames` on by default.
 3. Clicks: `Frame::index_at(Position)` plus grapheme to byte on the raw
    buffer, replacing `last_layout` for frame paints. Watch the selection's
    blank cell (`styled_text.rs`, `shows_on_a_blank_cell`), which takes a
    buffer index in the frame.
 4. Regions, one `frame_can_paint` condition each, each first as a
    `both_painters` case: status line and footer, right prompt, menus,
-   semantic markers (OSC 133 as marks), then `CellStyle` and the row diff.
+   semantic markers (OSC 133 as marks). Menus keep returning their painted
+   strings through the `Menu` trait; the frame lays those out as rows.
 5. Delete the streaming painter and the switch.
+
+`CellStyle` and the row diff come after this PR: the streaming painter
+redraws in full too, so neither is parity.
 
 ## Open
 
@@ -149,5 +183,5 @@ could not see it. Before the semantic markers region (Next, step 4):
 
 ## Not pushed
 
-The rebase rewrote commits already on the fork:
-`git push --force-with-lease origin feat/frame-painter-v2`.
+The rebase onto `452867e` rewrote commits already on the fork (which holds
+`b3d2e5e`): `git push --force-with-lease origin feat/frame-painter-v2`.

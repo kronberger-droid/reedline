@@ -13,11 +13,12 @@ user-facing switch and no env var. The branch ends with `print_small_buffer`,
 `print_large_buffer`, `compute_layout`, `skip_buffer_lines`,
 `render_snapshot` and `screen_to_buffer_offset` deleted.
 
-Until then `Painter::paints_frames` is a crate-internal switch (off by
-default), and `Painter::frame_can_paint` sends every paint the frame cannot
+Until then `Painter::paints_frames` is a crate-internal switch, on by
+default, and `Painter::frame_can_paint` sends every paint the frame cannot
 draw yet to the streaming painter. Each region the frame learns removes one
-condition from it. The existing painter tests are the regression suite:
-once the switch is on by default they run against the frame.
+condition from it. The existing painter tests are the regression suite and
+run against the frame. A test of the streaming painter's own mechanics opts
+out with `paint_streaming_for_test` and goes away with it.
 
 ## What exists
 
@@ -39,7 +40,7 @@ Painter side:
 - `PromptLines::continuation`, `with_bare_buffer`, `frame_buffer()`. The
   engine renders the bare buffer only while `paints_frames` is on.
 - `src/painting/painter/frame.rs`: `frame_can_paint`, `repaint_frame`,
-  `PromptParts`, `record_frame_exit`, `paint_frames_for_test`.
+  `PromptParts`, `record_frame_exit`, `paint_streaming_for_test`.
 
 `repaint_frame` order, which has to hold: reset and hide, prompt parts,
 layout, `top`, `resolve_resize(cursor.row - top + 1)`,
@@ -78,8 +79,9 @@ The frame is right in each, so tall-buffer tests assert on the frame alone.
   the trailing empty line: the screen shows `2 3 4` with the cursor on the
   `4` row, where the frame shows `3 4` and the cursor on the empty row.
 
-Not decided: whether these are worth fixing in code this PR deletes. The
-first is a one-line fix; the other two go deeper into `print_large_buffer`.
+The first is fixed on `fix/large-buffer-empty-indicator` (one commit on
+`upstream/main`, not pushed), to go to `main` as its own PR. The other two
+go deeper into `print_large_buffer` and are left to the frame.
 
 ## Settled along the way
 
@@ -91,26 +93,37 @@ first is a one-line fix; the other two go deeper into `print_large_buffer`.
   rules for them (#526).
 - `top` is a frame row, `anchor` a screen row; frame row `r` is drawn on
   screen row `anchor + r - top`.
+- `large_buffer` after a frame paint is `frame.height() > height`. Every
+  reader of the field is streaming code that sets it again before reading,
+  so it goes with the streaming painter.
+- A tall frame keeps its top while the cursor's row fits below it, as the
+  streaming painter does: `viewport_top` skips rows only to bring the
+  cursor's row onto the last screen row. It used to show the bottom of the
+  frame up to the cursor's row, which dropped the first prompt row of a
+  frame one row too tall. `a_large_buffer_keeps_the_prompts_trailing_newline`
+  caught it. Revisit when menus become frame rows: the viewport then has to
+  keep some menu rows on screen too, as `large_buffer_offset` does today.
 
-## With the switch on by default: 10 of 2543 lib tests fail
+## What turning the switch on took
 
-Measured on `30dcc6e`, then reverted. No screen-level regression seen; not
-debugged one by one.
+Ten lib tests failed. One was the viewport rule above. The rest:
 
-| Tests | Why | Likely |
-|---|---|---|
-| `a_paint_that_erases_first_leaves_nothing_behind` (2 cases), `a_large_buffer_keeps_the_prompts_trailing_newline` | assert streaming bytes (`\x1b[2;1H\x1b[J`, `ab\r\n> Z`) | rewrite on `TestScreen` or drop with the streaming path; the screen half of the first passes |
-| 5 hint tests in `engine.rs` | `contains` on captured bytes | same, but check each: these may run at a tiny width, which splits the hint across rows |
-| `a_paint_that_reserves_nothing_draws_no_status_rows` | `last_layout.expect` | expected until clicks read the frame |
-| `a_plain_paint_sends_no_frame_marker::large_buffer` | `large_buffer` is `frame.height() > height` here, `required_lines >= height` in the streaming painter | decide what `large_buffer` still means |
+- Five hint tests in `engine.rs` painted on an unsized painter, 0 by 0,
+  where the frame draws nothing. They are sized now and use a short prompt,
+  since a working directory long enough to wrap splits the bytes they
+  search. The real start path turns an unreported size into 80 by 24; a
+  `Resize(0, 0)` event still reaches the painter as it is.
+- Byte assertions on the streaming painter's output moved to `TestScreen`,
+  or opt out with `paint_streaming_for_test` where the bytes are the point
+  (erasing first for a line of uncertain width).
 
 ## Next
 
 1. Done: the resize screen tests. `top` in the `resolve_resize` argument is
    not pinned by them: the saturating subtraction gives the same anchor
    without it unless the terminal's cursor sits lower than the frame expects.
-2. Work through the 10 failures above (counted before the rebase onto
-   #1297), then turn `paints_frames` on by default.
+2. Done: `paints_frames` is on by default. **Clicks do nothing after a frame
+   paint until step 3**, so the branch is not for daily use before it.
 3. Clicks: `Frame::index_at(Position)` plus grapheme to byte on the raw
    buffer, replacing `last_layout` for frame paints. Watch the selection's
    blank cell (`styled_text.rs`, `shows_on_a_blank_cell`), which takes a
@@ -126,6 +139,16 @@ redraws in full too, so neither is parity.
 
 ## Open
 
+- **The frame places the cursor by its own column count.** `write_frame`
+  ends with a `MoveTo` to the column the layout worked out. The streaming
+  painter leaves the cursor where the terminal put it after printing, or
+  saves and restores it, so it stays right on a terminal that measures a
+  grapheme differently (ambiguous-width characters, some emoji). On such a
+  terminal the frame's cursor lands a column off, and a row the frame
+  thinks is full wraps early. Not seen on a real terminal yet; the
+  `an_ambiguous_width` case shows the bytes. One way out for the common
+  case: write the cursor's row last and skip the move when the cursor sits
+  at the end of it.
 - Multi-line hints get their continuation from `continue_hint_lines` in the
   engine. Harmless in the frame (hint cells take no index), but the layout
   could own it like the buffer's.
@@ -183,5 +206,6 @@ could not see it. Before the semantic markers region (Next, step 4):
 
 ## Not pushed
 
-The rebase onto `452867e` rewrote commits already on the fork (which holds
-`b3d2e5e`): `git push --force-with-lease origin feat/frame-painter-v2`.
+The fork holds the rebase onto `452867e` up to `9077398`. Everything after
+it is local, and a plain push is enough:
+`git push origin feat/frame-painter-v2`.

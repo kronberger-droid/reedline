@@ -1000,6 +1000,19 @@ fn a_frame_taller_than_the_screen_shows_its_bottom_from_the_top_row() {
     assert_eq!(session.screen.cursor(), (1, 2));
 }
 
+/// The prompt is the last thing to go: while the cursor's row fits below the
+/// top of the frame, the rows that do not fit are cut from the bottom.
+#[test]
+fn a_frame_taller_than_the_screen_keeps_its_top_while_the_cursor_row_fits() {
+    let prompt = FixedPrompt::new("", "> ");
+
+    let [streaming, frame] =
+        both_painters(&[], (10, 3), &|s| s.paint(&prompt, "1\n2", "\n3\n4\n5"));
+
+    assert_eq!(frame, streaming);
+    assert_eq!(frame, (vec!["> 1".into(), "2".into(), "3".into()], (1, 1)));
+}
+
 /// After a resize the terminal has reflowed the block and reports only the
 /// row its cursor is on. The prompt starts as many rows above it as the frame
 /// lays out before the cursor at the new width, so the paint lands on the

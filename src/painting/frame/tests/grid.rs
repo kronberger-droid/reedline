@@ -85,15 +85,16 @@ fn a_frame_looks_a_column_up_on_its_row() {
     assert_eq!(frame.index_at(Position { row: 2, col: 0 }), None);
 }
 
-/// The viewport scrolls down just far enough to show the bottom of the
-/// frame, and never past the cursor's row.
+/// The viewport scrolls down just far enough to show the cursor's row, so
+/// the top of the frame stays until then, and never past the cursor's row.
 #[rstest]
 #[case::fits(3, 0, 5, 0)]
 #[case::fits_exactly(5, 4, 5, 0)]
 #[case::cursor_at_the_bottom(6, 5, 5, 1)]
-#[case::cursor_at_the_top_wins(6, 0, 5, 0)]
-#[case::cursor_in_the_middle(20, 2, 5, 2)]
-#[case::cursor_near_the_end(20, 18, 5, 15)]
+#[case::cursor_at_the_top(6, 0, 5, 0)]
+#[case::cursor_on_a_row_that_fits(20, 2, 5, 0)]
+#[case::cursor_on_the_last_row_that_fits(20, 4, 5, 0)]
+#[case::cursor_near_the_end(20, 18, 5, 14)]
 #[case::no_screen(6, 5, 0, 5)]
 fn viewport_top_keeps_the_cursor_row_on_screen(
     #[case] rows: usize,

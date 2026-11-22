@@ -121,21 +121,21 @@ impl Frame {
 
     /// The first row to show when only `screen_rows` rows fit.
     ///
-    /// Two rules, and the second wins:
-    ///
-    /// 1. Show the bottom of the frame. That means skipping
-    ///    `height - screen_rows` rows at the top, or none when the frame
-    ///    fits (a saturating subtraction).
-    /// 2. Never skip the cursor's row. So the answer is at most
-    ///    `cursor.row`.
+    /// The top of the frame stays for as long as the cursor's row fits below
+    /// it, so the prompt is the last thing to go. Rows are skipped only to
+    /// bring the cursor's row onto the last screen row, and what does not fit
+    /// below the cursor is cut, as the streaming painter cuts it. With no
+    /// screen at all the cursor's row is still not skipped.
     ///
     /// ```text
     /// 6 rows, screen of 5, cursor on row 5  ->  1   rows 1..=5 show
-    /// 6 rows, screen of 5, cursor on row 0  ->  0   the cursor wins
+    /// 6 rows, screen of 5, cursor on row 0  ->  0   row 5 is cut
     /// 3 rows, screen of 5                   ->  0   it fits
     /// ```
     pub(crate) fn viewport_top(&self, screen_rows: u16) -> u16 {
-        self.height()
+        self.cursor
+            .row
+            .saturating_add(1)
             .saturating_sub(screen_rows)
             .min(self.cursor.row)
     }

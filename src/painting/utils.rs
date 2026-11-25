@@ -2,40 +2,6 @@ use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Ensures input uses CRLF line endings.
-///
-/// Needed for correct output in raw mode.
-/// Only replaces solitary LF with CRLF.
-pub(crate) fn coerce_crlf(input: &str) -> Cow<'_, str> {
-    let mut result = Cow::Borrowed(input);
-    let mut cursor: usize = 0;
-    for (idx, _) in input.match_indices('\n') {
-        if !(idx > 0 && input.as_bytes().get(idx - 1) == Some(&b'\r')) {
-            match &mut result {
-                Cow::Borrowed(_) => {
-                    // Best case 1 allocation, worst case 2 allocations.
-                    // Avoid `AddAssign for Cow<str>` because its empty-LHS
-                    // optimization may replace the preallocation.
-                    let mut owned = String::with_capacity(input.len() + 1);
-                    owned.push_str(&input[cursor..idx]);
-                    owned.push_str("\r\n");
-                    result = Cow::Owned(owned);
-                }
-                Cow::Owned(result) => {
-                    result.push_str(&input[cursor..idx]);
-                    result.push_str("\r\n");
-                }
-            }
-            // Advance beyond the matched LF char (single byte)
-            cursor = idx + 1;
-        }
-    }
-    if let Cow::Owned(result) = &mut result {
-        result.push_str(&input[cursor..input.len()]);
-    }
-    result
-}
-
 /// Returns string with the ANSI escape codes removed
 ///
 /// If parsing fails silently returns the input string
@@ -47,7 +13,7 @@ pub(crate) fn strip_ansi(string: &str) -> String {
 
 /// Shows control characters readline-style (`^[`, `^?`, `M-^[`) instead of
 /// letting the terminal act on them, so untrusted text cannot erase or redraw
-/// the line. `\n` and `\t` pass through.
+/// the line. `\n`, `\t` and a `\r` followed by `\n` pass through.
 pub(crate) fn escape_control(text: &str) -> Cow<'_, str> {
     escape_with(text, Escape::All)
 }
@@ -62,14 +28,14 @@ pub(crate) fn escape_control_keep_sgr(text: &str) -> Cow<'_, str> {
 /// SGR (see `escape_suggestions`), so any `ESC` left is that SGR: whole,
 /// uppercased into another command by a selected row (`ESC[5m` into `ESC[5M`,
 /// delete lines), or cut short by truncation. The first two are dropped, a cut
-/// one is shown. The menu's own `\r\n` passes.
+/// one is shown. The menu's own line breaks pass.
 pub(crate) fn plain_menu_text(text: &str) -> Cow<'_, str> {
     escape_with(text, Escape::DropSgr)
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Escape {
-    /// Every control char but `\n` and `\t`.
+    /// Every control char but `\n`, `\t` and a `\r` followed by `\n`.
     All,
     /// As `All`, keeping well-formed SGR.
     KeepSgr,
@@ -91,7 +57,7 @@ fn escape_with(text: &str, mode: Escape) -> Cow<'_, str> {
         let escaped = sgr.is_none()
             && match mode {
                 Escape::DropSgr => c == '\x1b' || ('\u{80}'..='\u{9f}').contains(&c),
-                _ => c.is_control() && c != '\n' && c != '\t',
+                _ => c.is_control() && c != '\n' && c != '\t' && !rest.starts_with("\r\n"),
             };
         let dropped = sgr.is_some() && mode == Escape::DropSgr;
 
@@ -374,6 +340,8 @@ mod test {
     #[case::esc("a\x1b[2Kb", "a^[[2Kb")]
     #[case::bell_and_backspace("\x07\x08", "^G^H")]
     #[case::carriage_return("bar\r", "bar^M")]
+    #[case::crlf_passes("a\r\nb", "a\r\nb")]
+    #[case::only_the_cr_at_the_lf_passes("a\r\r\nb", "a^M\r\nb")]
     #[case::del("x\x7f", "x^?")]
     #[case::c1_csi("\u{9b}2K", "M-^[2K")]
     #[case::sgr_is_not_spared("\x1b[8mhidden", "^[[8mhidden")]
@@ -390,6 +358,8 @@ mod test {
     #[case::osc("\x1b]52;c;aGk=\x07", "^[]52;c;aGk=^G")]
     #[case::unterminated_sgr("\x1b[1", "^[[1")]
     #[case::bare_esc_at_end("a\x1b", "a^[")]
+    #[case::crlf_passes("a\r\nb", "a\r\nb")]
+    #[case::cr_without_lf("a\rb\r", "a^Mb^M")]
     fn escape_control_keep_sgr_spares_only_sgr(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(escape_control_keep_sgr(input), expected);
     }
@@ -407,6 +377,7 @@ mod test {
     #[rstest]
     #[case("plain")]
     #[case("\x1b[1mbold\x1b[0m")]
+    #[case("two\r\nlines")]
     fn nothing_to_escape_borrows(#[case] input: &str) {
         assert!(matches!(escape_control_keep_sgr(input), Cow::Borrowed(_)));
     }
@@ -425,25 +396,6 @@ mod test {
     #[test]
     fn nothing_to_expand_borrows() {
         assert!(matches!(expand_tabs("no tabs"), Cow::Borrowed(_)));
-    }
-
-    #[rstest]
-    #[case("sentence\nsentence", "sentence\r\nsentence")]
-    #[case("sentence\r\nsentence", "sentence\r\nsentence")]
-    #[case("sentence\nsentence\n", "sentence\r\nsentence\r\n")]
-    #[case("😇\nsentence", "😇\r\nsentence")]
-    #[case("sentence\n😇", "sentence\r\n😇")]
-    #[case("\n", "\r\n")]
-    #[case("", "")]
-    fn test_coerce_crlf(#[case] input: &str, #[case] expected: &str) {
-        let result = coerce_crlf(input);
-
-        assert_eq!(result, expected);
-
-        assert!(
-            input != expected || matches!(result, Cow::Borrowed(_)),
-            "Unnecessary allocation"
-        )
     }
 
     /// Narrow graphemes pack a row exactly, so the margin falls on every whole
@@ -597,15 +549,6 @@ mod test {
     fn wrap_position_lays_pieces_end_to_end() {
         assert_eq!(wrap_position(["ab", "cd"], 3), Some((1, 1)));
         assert_eq!(wrap_position(["abcd"], 3), Some((1, 1)));
-    }
-
-    /// Regression: no-color rendering strips ANSI bytes before CRLF coercion,
-    /// so text after the cursor can start with the raw LF that moves to the
-    /// next continuation prompt. The leading replacement was lost before
-    /// later newlines by `Cow<str> += ...`.
-    #[test]
-    fn coerce_crlf_preserves_leading_replacement_before_later_newline() {
-        assert_eq!(coerce_crlf("\n::: 3\n::: 4"), "\r\n::: 3\r\n::: 4");
     }
 
     /// Narrow-terminal regression: a zero-column terminal used to panic

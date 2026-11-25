@@ -545,6 +545,25 @@ fn frame_right_prompt_on_last_line_after_a_prompt_ending_in_newline() {
     assert_eq!(session.click(&prompt, "hi", "", 10, 2), None);
 }
 
+// A large buffer is cut at the newline it ends with, and the cursor goes to
+// the start of the row the cut is on. That is the column of the empty line
+// the cursor is really on, a row further down, and it is what was drawn while
+// the buffer still came with a `\r` before each of its newlines.
+//
+// The streaming painter's large-buffer path only: the frame has no such path.
+#[rstest]
+#[case::ends_in_a_newline("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")]
+#[case::ends_in_a_crlf("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\r\n")]
+fn large_buffer_ending_in_a_line_break_leaves_the_cursor_at_column_zero(#[case] buffer: &str) {
+    let mut session = Session::new(Engine::Streaming, 20, 5, 0);
+    let prompt = FixedPrompt::new("> ", "");
+
+    session.paint(&prompt, buffer, "");
+
+    assert!(session.painter.large_buffer);
+    assert_eq!(session.screen.cursor().0, 0);
+}
+
 // A buffer taller than the screen is drawn as a viewport onto its tail. Which
 // rows scroll off is decided by `compute_layout` counting `str::lines()`, so a
 // single line wrapping past the bottom reads as fitting: the paint emits one
@@ -577,6 +596,29 @@ fn large_buffer_of_one_wrapped_line_stays_on_screen_with(engine: Engine) {
     }
     assert_eq!(session.screen.row(4), "xx");
     assert_eq!(session.screen.cursor(), (2, 4));
+}
+
+// An empty indicator still shares the prompt's last row with the buffer's
+// first line. Counted as no row at all, the viewport started one row early:
+// the paint emitted a row too many and the terminal scrolled, on every paint.
+#[rstest]
+#[case::no_indicator("> ", "")]
+#[case::an_indicator("", "> ")]
+fn large_buffer_stays_on_screen_whatever_the_indicator(
+    #[case] left: &'static str,
+    #[case] indicator: &'static str,
+    #[values(Engine::Streaming, Engine::Frame)] engine: Engine,
+) {
+    let mut session = Session::new(engine, 10, 3, 0);
+    let prompt = FixedPrompt::new(left, indicator);
+
+    session.paint(&prompt, "1\n2\n3\n4\n5", "");
+    let scrolled_by_first_paint = session.screen.scrolled();
+    session.paint(&prompt, "1\n2\n3\n4\n5", "");
+
+    assert_eq!(session.screen.scrolled(), scrolled_by_first_paint);
+    assert_eq!(session.screen.rows(), ["3", "4", "5"]);
+    assert_eq!(session.screen.cursor(), (1, 2));
 }
 
 #[rstest]

@@ -527,6 +527,93 @@ pub(crate) struct PromptLayout {
     first_buffer_col: u16,
 }
 
+/// The screen row the prompt block is held to.
+///
+/// Only the frame painter honors it. Output printed while the host runs a
+/// command is never held to it: the block is placed when it is painted, on
+/// every paint. Output that reaches past the anchor is scrolled up until its
+/// last row sits right above the block, and output that ends short of it
+/// leaves the rows in between empty.
+///
+/// A block too tall for the rows from the anchor down starts further up for
+/// as long as it is that tall, into empty rows where there are any and by
+/// scrolling the output otherwise, and goes back once it fits again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptAnchor {
+    /// Right below whatever was printed last.
+    #[default]
+    Flow,
+    /// Starting on this row, counted from the top from 0. A row past the end
+    /// of the screen is the last one.
+    Row(u16),
+    /// Ending on the last row, however many rows the block has.
+    Bottom,
+}
+
+impl PromptAnchor {
+    /// Read an anchor from `top`, `bottom`, `flow` or a row number, `None`
+    /// for anything else.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "flow" => Some(PromptAnchor::Flow),
+            "top" => Some(PromptAnchor::Row(0)),
+            "bottom" => Some(PromptAnchor::Bottom),
+            row => row.parse().ok().map(PromptAnchor::Row),
+        }
+    }
+
+    /// The row a block of `visible` rows is wanted on, on a screen of
+    /// `height` rows. `None` leaves it where it is.
+    fn wanted_row(self, visible: u16, height: u16) -> Option<u16> {
+        match self {
+            PromptAnchor::Flow => None,
+            PromptAnchor::Row(row) => Some(row),
+            PromptAnchor::Bottom => Some(height.saturating_sub(visible)),
+        }
+    }
+
+    /// The rows from the anchor to the end of a screen of `height` rows, which
+    /// is what a block gets without leaving its anchor.
+    fn rows_below(self, height: u16) -> u16 {
+        match self {
+            PromptAnchor::Row(row) => height.saturating_sub(row).max(1),
+            PromptAnchor::Flow | PromptAnchor::Bottom => height,
+        }
+    }
+}
+
+/// Where a paint puts its block, from [`place_frame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    /// Rows to scroll the screen up by before drawing.
+    scroll: u16,
+    /// Screen row of the block's first row, after the scroll.
+    anchor: u16,
+    /// The floor after the scroll.
+    floor: u16,
+}
+
+/// Place a block of `visible` rows on a screen of `height` rows.
+///
+/// `wanted` is the row it should start on. `floor` is the first row the
+/// host's output does not reach: the block can start there or anywhere below
+/// at no cost, and every row it starts above the floor is a row the output
+/// has to scroll up by.
+///
+/// The block never ends below the last row, so one too tall to start on
+/// `wanted` starts as far up as it needs. Without an anchor `wanted` and
+/// `floor` are both the row the block is on, which leaves only that case:
+/// scroll by the rows the block overflows.
+fn place_frame(wanted: u16, floor: u16, visible: u16, height: u16) -> Placement {
+    let anchor = wanted.min(height.saturating_sub(visible));
+    let scroll = floor.saturating_sub(anchor);
+    Placement {
+        scroll,
+        anchor,
+        floor: floor - scroll,
+    }
+}
+
 /// Cached row where the prompt starts on screen, together with its
 /// freshness.
 ///
@@ -657,6 +744,20 @@ pub struct Painter {
     /// What the last frame paint left on screen, for the next one to diff
     /// against. `None` whenever something else may have drawn since.
     last_frame: Option<PaintedFrame>,
+    /// The row frame paints hold the block to. See [`PromptAnchor`].
+    prompt_anchor: PromptAnchor,
+    /// Where the last anchored paint put the block, and the floor it had
+    /// then. See [`Painter::floor_of`].
+    placed: Option<Placed>,
+}
+
+/// What an anchored paint leaves for the next one: the block's row, and the
+/// first row above it that the host's output does not reach. The rows from
+/// `floor` up to `anchor` are empty.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    floor: u16,
+    anchor: u16,
 }
 
 /// A [`Frame`] as it was committed: which of its rows reached the screen and
@@ -726,6 +827,8 @@ impl Painter {
             menu_room: 0,
             frame_mode,
             last_frame: None,
+            prompt_anchor: PromptAnchor::default(),
+            placed: None,
             terminal_taken: None,
             #[cfg(test)]
             cursor_queries: 0,
@@ -737,6 +840,29 @@ impl Painter {
     /// next paint redraws every row.
     fn forget_frame(&mut self) {
         self.last_frame = None;
+    }
+
+    /// Sets the row frame paints hold the prompt block to. See
+    /// [`PromptAnchor`].
+    pub fn set_prompt_anchor(&mut self, anchor: PromptAnchor) {
+        self.prompt_anchor = anchor;
+    }
+
+    /// The first row the host's output does not reach, for a block on
+    /// `anchor`.
+    ///
+    /// That is `anchor` itself unless an anchored paint put the block there
+    /// and left empty rows above it. What that paint recorded holds only
+    /// while the block is still on the row it chose. Whoever moves the block
+    /// to a row of its own choosing clears `placed`, since the new row can
+    /// happen to be the old one.
+    fn floor_of(&self, anchor: u16) -> u16 {
+        match self.placed {
+            Some(placed) if self.prompt_anchor != PromptAnchor::Flow && placed.anchor == anchor => {
+                placed.floor
+            }
+            _ => anchor,
+        }
     }
 
     /// The marker that opens the primary prompt on this paint, if markers
@@ -1173,6 +1299,7 @@ impl Painter {
     /// asking the terminal where the cursor is.
     fn anchor_prompt(&mut self, suspended_state: Option<&PainterSuspendedState>) -> Result<()> {
         // A new prompt, wherever it lands: the host printed since the last one.
+        self.placed = None;
         self.forget_frame();
         self.remark_prompt();
         // Hide before asking, not only before painting. The exit path leaves
@@ -1542,7 +1669,12 @@ impl Painter {
             // has scrolled to make room, which it can up to the top of the
             // screen, so the anchor does not enter into it. Fewer than the
             // menu's minimum, and the viewport scrolls the top off instead.
-            let available = height
+            //
+            // A block held to a row gets the rows from there down, so the
+            // menu opens below the prompt instead of pushing it up.
+            let available = self
+                .prompt_anchor
+                .rows_below(height)
                 .saturating_sub(frame.cursor.1.saturating_add(1))
                 .saturating_sub(frame.status_rows)
                 .max(menu.min_rows());
@@ -1564,6 +1696,30 @@ impl Painter {
         } else {
             self.prompt_start_row.last_known_row()
         };
+        let place = place_frame(
+            self.prompt_anchor
+                .wanted_row(visible, height)
+                .unwrap_or(anchor_before),
+            self.floor_of(anchor_before),
+            visible,
+            height,
+        );
+        // A scroll takes the rows of the last paint up with it. A block that
+        // lands anywhere else has moved over the screen: its old rows are no
+        // use to the diff, and the prompt is on another row than the one
+        // marked.
+        let moved = place.anchor != anchor_before.saturating_sub(place.scroll);
+        if moved {
+            self.remark_prompt();
+            if let (Some(markers), Some(prompt_start)) =
+                (input.markers.as_mut(), self.primary_prompt_marker())
+            {
+                if markers.prompt_start != prompt_start {
+                    markers.prompt_start = prompt_start;
+                    frame = frame::layout(&input);
+                }
+            }
+        }
 
         // Cursor queries above must finish before the frame begins. End the frame even if
         // drawing fails, so a recoverable write error cannot leave updates suspended.
@@ -1572,17 +1728,29 @@ impl Painter {
             let last = self
                 .last_frame
                 .take()
-                .filter(|painted| painted.anchor == anchor_before);
+                .filter(|painted| painted.anchor == anchor_before && !moved);
 
-            // Make room below the anchor. The scroll moves the old rows up by
-            // as much as the anchor, so they stay aligned with the new ones.
-            let mut anchor = anchor_before;
-            let overflow = anchor.saturating_add(visible).saturating_sub(height);
-            if overflow > 0 {
-                self.queue_universal_scroll(overflow)?;
-                anchor = anchor.saturating_sub(overflow);
+            // Make room for the block. The scroll moves the old rows up by as
+            // much as the anchor, so they stay aligned with the new ones.
+            let anchor = place.anchor;
+            if place.scroll > 0 {
+                self.queue_universal_scroll(place.scroll)?;
             }
             self.prompt_start_row.mark_verified(anchor);
+            self.placed = Some(Placed {
+                floor: place.floor,
+                anchor,
+            });
+            // The rows between the output and the block: a block that moved
+            // down left its old rows there, and on a first paint they hold
+            // whatever the host left below its cursor.
+            if last.is_none() {
+                for row in place.floor..anchor {
+                    self.stdout
+                        .queue(MoveTo(0, row))?
+                        .queue(Clear(ClearType::UntilNewLine))?;
+                }
+            }
 
             let last_rows: &[Row] = last.as_ref().map(PaintedFrame::rows).unwrap_or(&[]);
             let new_rows = &frame.rows[top as usize..(top + visible) as usize];
@@ -2430,7 +2598,9 @@ impl Painter {
     /// Updates prompt origin and offset to handle a screen resize event
     pub(crate) fn handle_resize(&mut self, width: u16, height: u16) {
         self.terminal_size = (width, height);
-        // Rows rewrap at the new width; the old frame says nothing about them.
+        // Rows rewrap at the new width; the old frame says nothing about them,
+        // and neither does the count of empty rows above it.
+        self.placed = None;
         self.forget_frame();
         // The terminal may have reflowed or cleared the marked row.
         self.remark_prompt();
@@ -2621,7 +2791,11 @@ impl Painter {
         // the way the repaint after this will, so the messages start where
         // that repaint draws the block, and before the frame opens.
         self.reconcile_stale_anchor();
-        let start = self.prompt_start_row.last_known_row();
+        // Right below the output, which is above the block's row when an
+        // anchored paint left empty rows between the two. The messages are
+        // output from here on, so those rows are no longer known to be empty.
+        let start = self.floor_of(self.prompt_start_row.last_known_row());
+        self.placed = None;
         let start_verified = matches!(self.prompt_start_row, PromptStartRow::Verified(_));
         // Invalidate before the first queued byte: a `?` early-return below
         // must not leave bytes in the buffer with the cache still claiming

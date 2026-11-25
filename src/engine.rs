@@ -28,7 +28,8 @@ use {
         },
         painting::{
             continue_hint_lines, escape_control, escape_control_keep_sgr, Painter,
-            PainterSuspendedState, PromptLines, RenderSnapshot, TerminalTakenSignal, W,
+            PainterSuspendedState, PromptAnchor, PromptLines, RenderSnapshot, TerminalTakenSignal,
+            W,
         },
         prompt::{PromptEditMode, PromptHistorySearchStatus},
         result::{ReedlineError, ReedlineErrorVariants},
@@ -551,7 +552,19 @@ impl Reedline {
     pub fn create() -> Self {
         let history = Box::<FileBackedHistory>::default();
         #[cfg(not(test))]
-        let painter = Painter::new(W::terminal());
+        let painter = {
+            let mut painter = Painter::new(W::terminal());
+            // Prototype knob, like the frame painter's own: lets a host with
+            // no setting for it yet try the anchor. `with_prompt_anchor`
+            // overrides it.
+            if let Some(anchor) = std::env::var("REEDLINE_PROMPT_ANCHOR")
+                .ok()
+                .and_then(|value| PromptAnchor::parse(&value))
+            {
+                painter.set_prompt_anchor(anchor);
+            }
+            painter
+        };
         #[cfg(test)]
         let painter = Painter::new(W::sink());
         let buffer_highlighter = Box::<ExampleHighlighter>::default();
@@ -1144,6 +1157,15 @@ impl Reedline {
     /// Do not use this if the cursor shape is set elsewhere, e.g. in the terminal settings or by ansi escape sequences.
     pub fn with_cursor_config(mut self, cursor_shapes: CursorConfig) -> Self {
         self.cursor_shapes = Some(cursor_shapes);
+        self
+    }
+
+    /// A builder that holds the prompt block to a row of the screen, instead
+    /// of the row right below the output before it. Only the frame painter
+    /// honors it. See [`PromptAnchor`].
+    #[must_use]
+    pub fn with_prompt_anchor(mut self, anchor: PromptAnchor) -> Self {
+        self.painter.set_prompt_anchor(anchor);
         self
     }
 

@@ -1477,3 +1477,240 @@ fn a_paint_that_erases_first_leaves_nothing_behind(
     let paint = String::from_utf8_lossy(&session.painter.stdout.captured()[start..]).into_owned();
     assert!(paint.contains("\x1b[2;1H\x1b[J"), "{paint:?}");
 }
+
+impl Session {
+    /// A frame session with `output` on screen and a new prompt set up under
+    /// `anchor`, as the start of `read_line` leaves it.
+    fn anchored(anchor: PromptAnchor, width: u16, height: u16, output: &[&str]) -> Self {
+        let mut session = Self::after_output(Engine::Frame, width, height, output);
+        session.new_prompt(anchor);
+        session
+    }
+
+    /// Set up a new prompt under `anchor`, with the cursor wherever the host
+    /// output left it.
+    fn new_prompt(&mut self, anchor: PromptAnchor) {
+        let size = self.painter.terminal_size;
+        self.painter.set_prompt_anchor(anchor);
+        self.painter
+            .initialize_prompt_position_with_size(size, None)
+            .expect("initialize_prompt_position failed");
+        self.screen.sync(self.painter.stdout.captured());
+    }
+
+    /// Leave `read_line`, as a submitted line does.
+    fn leave(&mut self) {
+        self.painter
+            .move_cursor_to_end()
+            .expect("move_cursor_to_end failed");
+        self.screen.sync(self.painter.stdout.captured());
+    }
+}
+
+// The scroll a block needs is what it reaches above the floor, and it starts
+// above the row it wants only when it would end below the last one.
+#[rstest]
+#[case::no_anchor_and_room(3, 3, 2, 10, (0, 3, 3))]
+#[case::no_anchor_and_overflow(8, 8, 4, 10, (2, 6, 6))]
+#[case::output_past_the_anchor(2, 7, 1, 10, (5, 2, 2))]
+#[case::output_short_of_the_anchor(6, 2, 1, 10, (0, 6, 2))]
+#[case::too_tall_but_the_empty_rows_hold_it(6, 2, 7, 10, (0, 3, 2))]
+#[case::too_tall_for_the_empty_rows(6, 5, 7, 10, (2, 3, 3))]
+#[case::taller_than_the_screen(6, 2, 10, 10, (2, 0, 0))]
+#[case::wanted_past_the_screen(40, 2, 1, 10, (0, 9, 2))]
+fn a_frame_is_placed_from_its_floor(
+    #[case] wanted: u16,
+    #[case] floor: u16,
+    #[case] visible: u16,
+    #[case] height: u16,
+    #[case] (scroll, anchor, new_floor): (u16, u16, u16),
+) {
+    assert_eq!(
+        place_frame(wanted, floor, visible, height),
+        Placement {
+            scroll,
+            anchor,
+            floor: new_floor
+        }
+    );
+}
+
+#[rstest]
+#[case("top", Some(PromptAnchor::Row(0)))]
+#[case("bottom", Some(PromptAnchor::Bottom))]
+#[case("flow", Some(PromptAnchor::Flow))]
+#[case(" 12 ", Some(PromptAnchor::Row(12)))]
+#[case("-1", None)]
+#[case("middle", None)]
+#[case("", None)]
+fn prompt_anchor_parses_a_name_or_a_row(#[case] value: &str, #[case] anchor: Option<PromptAnchor>) {
+    assert_eq!(PromptAnchor::parse(value), anchor);
+}
+
+// The output ran past the anchor while the command was free to print. The
+// prompt comes back on its row, and what had to leave the screen for that is
+// still there to scroll back to.
+#[test]
+fn output_past_the_prompt_anchor_scrolls_up_to_it() {
+    let mut session =
+        Session::anchored(PromptAnchor::Row(2), 20, 6, &["o1", "o2", "o3", "o4", "o5"]);
+
+    session.paint(&FixedPrompt::new("> ", ""), "hi", "");
+
+    assert_eq!(session.screen.rows(), ["o4", "o5", "> hi", "", "", ""]);
+    assert_eq!(session.screen.cursor(), (4, 2));
+    assert_eq!(session.screen.scrollback_rows(), ["o1", "o2", "o3"]);
+}
+
+#[test]
+fn output_short_of_the_prompt_anchor_leaves_the_rows_between_empty() {
+    let mut session = Session::anchored(PromptAnchor::Row(3), 20, 6, &["o1"]);
+    let prompt = FixedPrompt::new("> ", "");
+
+    session.paint(&prompt, "hi", "");
+    assert_eq!(session.screen.rows(), ["o1", "", "", "> hi", "", ""]);
+
+    // The next paint finds the block where it put it and only draws the change.
+    session.paint(&prompt, "hip", "");
+    assert_eq!(session.screen.rows(), ["o1", "", "", "> hip", "", ""]);
+    assert_eq!(session.screen.scrolled(), 0);
+}
+
+// A command that moved the cursor up before it ended leaves text below the
+// row the next prompt would have taken, which is not the prompt's to keep.
+#[test]
+fn text_below_the_cursor_is_erased_up_to_the_prompt_anchor() {
+    let mut session = Session::after_output(Engine::Frame, 20, 6, &["o1", "o2", "o3"]);
+    session.host_output(b"\x1b[2;1H");
+    session.new_prompt(PromptAnchor::Row(4));
+
+    session.paint(&FixedPrompt::new("> ", ""), "hi", "");
+
+    assert_eq!(session.screen.rows(), ["o1", "", "", "", "> hi", ""]);
+}
+
+// The cursor is on the last row behind text, so the new prompt takes a line
+// break first and the paint scrolls the rest of the way.
+#[test]
+fn output_ending_on_the_last_row_without_a_line_break_scrolls_whole() {
+    let mut session = Session::after_output(Engine::Frame, 20, 4, &["o1", "o2", "o3"]);
+    session.host_output(b"o4");
+    session.new_prompt(PromptAnchor::Row(1));
+
+    session.paint(&FixedPrompt::new("> ", ""), "hi", "");
+
+    assert_eq!(session.screen.rows(), ["o4", "> hi", "", ""]);
+    assert_eq!(session.screen.scrollback_rows(), ["o1", "o2", "o3"]);
+}
+
+// The block ends on the last row whatever its height, and takes that height
+// from the empty rows above it rather than from the output.
+#[test]
+fn a_prompt_of_two_rows_under_the_bottom_anchor_scrolls_nothing() {
+    let mut session = Session::anchored(PromptAnchor::Bottom, 20, 6, &["o1"]);
+
+    session.paint(&FixedPrompt::new("abc\n", "> "), "hi", "");
+
+    assert_eq!(session.screen.rows(), ["o1", "", "", "", "abc", "> hi"]);
+    assert_eq!(session.screen.cursor(), (4, 5));
+    assert_eq!(session.screen.scrolled(), 0);
+}
+
+#[test]
+fn a_block_under_the_bottom_anchor_grows_up_and_shrinks_back_down() {
+    let mut session = Session::anchored(PromptAnchor::Bottom, 20, 6, &["o1"]);
+    let prompt = FixedPrompt::new("> ", "");
+
+    session.paint(&prompt, "a", "");
+    assert_eq!(session.screen.rows(), ["o1", "", "", "", "", "> a"]);
+
+    session.paint(&prompt, "a\nb\nc", "");
+    assert_eq!(session.screen.rows(), ["o1", "", "", "> a", "b", "c"]);
+    assert_eq!(session.screen.cursor(), (1, 5));
+
+    session.paint(&prompt, "a", "");
+    assert_eq!(session.screen.rows(), ["o1", "", "", "", "", "> a"]);
+    assert_eq!(session.screen.scrolled(), 0);
+}
+
+// Once the empty rows are used up, the output gives way, and only then. It
+// does not come back: what scrolled out is in scrollback.
+#[test]
+fn a_block_too_tall_for_the_empty_rows_scrolls_the_output() {
+    let mut session = Session::anchored(PromptAnchor::Row(4), 20, 6, &["o1", "o2"]);
+    let prompt = FixedPrompt::new("> ", "");
+
+    session.paint(&prompt, "a\nb\nc", "");
+    assert_eq!(session.screen.rows(), ["o1", "o2", "", "> a", "b", "c"]);
+    assert_eq!(session.screen.scrolled(), 0);
+
+    session.paint(&prompt, "a\nb\nc\nd\ne", "");
+    assert_eq!(session.screen.rows(), ["o2", "> a", "b", "c", "d", "e"]);
+    assert_eq!(session.screen.scrollback_rows(), ["o1"]);
+
+    // Back on the anchor within the same prompt.
+    session.paint(&prompt, "a", "");
+    assert_eq!(session.screen.rows(), ["o2", "", "", "", "> a", ""]);
+    assert_eq!(session.screen.cursor(), (3, 4));
+}
+
+#[test]
+fn the_next_prompt_is_on_the_anchor_again() {
+    let mut session = Session::anchored(PromptAnchor::Row(4), 20, 6, &["o1"]);
+    let prompt = FixedPrompt::new("> ", "");
+    session.paint(&prompt, "a\nb\nc", "");
+    assert_eq!(session.screen.rows(), ["o1", "", "", "> a", "b", "c"]);
+
+    session.leave();
+    session.host_output(b"out\r\n");
+    session.new_prompt(PromptAnchor::Row(4));
+    session.paint(&prompt, "hi", "");
+
+    assert_eq!(session.screen.rows(), ["> a", "b", "c", "out", "> hi", ""]);
+}
+
+// An external message is output: it goes right below what is there, into the
+// empty rows, and the block stays where it is until they are used up.
+#[test]
+fn external_messages_fill_the_rows_above_an_anchored_block() {
+    let mut session = Session::anchored(PromptAnchor::Row(3), 20, 6, &["o1"]);
+    let prompt = FixedPrompt::new("> ", "");
+    session.paint(&prompt, "hi", "");
+
+    session.commit(&["msg"]);
+    session.paint(&prompt, "hi", "");
+    assert_eq!(session.screen.rows(), ["o1", "msg", "", "> hi", "", ""]);
+    assert_eq!(session.screen.scrolled(), 0);
+
+    session.commit(&["m2", "m3", "m4"]);
+    session.paint(&prompt, "hi", "");
+    assert_eq!(session.screen.rows(), ["m2", "m3", "m4", "> hi", "", ""]);
+    assert_eq!(session.screen.scrollback_rows(), ["o1", "msg"]);
+}
+
+// A menu opens in the rows below the anchor and leaves the prompt on it.
+#[test]
+fn a_menu_opens_below_an_anchored_prompt() {
+    let mut session = Session::anchored(PromptAnchor::Row(2), 20, 8, &["o1"]);
+    let prompt = FixedPrompt::new("> ", "");
+    let menu = ReedlineMenu::EngineCompleter(Box::new(super::tests::TestMenu::new("m1\r\nm2")));
+
+    session.paint_with(&prompt, "pwd", "", "", Some(&menu));
+    assert_eq!(session.screen.rows()[..5], ["o1", "", "> pwd", "m1", "m2"]);
+
+    session.paint_with(&prompt, "pwd", "", "", None);
+    assert_eq!(session.screen.rows()[..5], ["o1", "", "> pwd", "", ""]);
+    assert_eq!(session.screen.scrolled(), 0);
+}
+
+// The anchor is the frame painter's. The streaming painter draws where the
+// output ended, as it does without one.
+#[test]
+fn the_streaming_painter_ignores_the_prompt_anchor() {
+    let mut session = Session::after_output(Engine::Streaming, 20, 6, &["o1"]);
+    session.new_prompt(PromptAnchor::Row(3));
+
+    session.paint(&FixedPrompt::new("> ", ""), "hi", "");
+
+    assert_eq!(session.screen.rows(), ["o1", "> hi", "", "", "", ""]);
+}

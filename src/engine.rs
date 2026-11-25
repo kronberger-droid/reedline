@@ -28,7 +28,8 @@ use {
         },
         painting::{
             continue_hint_lines, escape_control, escape_control_keep_sgr, Painter,
-            PainterSuspendedState, PromptLines, RenderSnapshot, TerminalTakenSignal, W,
+            PainterSuspendedState, PromptAnchor, PromptLines, RenderSnapshot, TerminalTakenSignal,
+            W,
         },
         prompt::{PromptEditMode, PromptHistorySearchStatus},
         result::{ReedlineError, ReedlineErrorVariants},
@@ -1144,6 +1145,14 @@ impl Reedline {
     /// Do not use this if the cursor shape is set elsewhere, e.g. in the terminal settings or by ansi escape sequences.
     pub fn with_cursor_config(mut self, cursor_shapes: CursorConfig) -> Self {
         self.cursor_shapes = Some(cursor_shapes);
+        self
+    }
+
+    /// A builder that sets the row every new prompt starts on, instead of the
+    /// row right below the output before it. See [`PromptAnchor`].
+    #[must_use]
+    pub fn with_prompt_anchor(mut self, anchor: PromptAnchor) -> Self {
+        self.painter.set_prompt_anchor(anchor);
         self
     }
 

@@ -701,6 +701,10 @@ pub struct Painter {
     /// right, and `move_cursor_to_end` has no `prompt` to re-derive the color
     /// from, so both have to be captured during the paint.
     exit_right_prompt: Option<(String, RightPromptBounds)>,
+    /// Screen row the buffer ended on in the last frame paint, which is the
+    /// row the exit path leaves the entry's last text on. See
+    /// [`Painter::free_the_anchor_row`].
+    exit_end_row: Option<u16>,
     /// Optional semantic prompt markers for terminal integration (OSC 133/633)
     semantic_markers: Option<Box<dyn SemanticPromptMarkers>>,
     /// Whether the prompt on screen got its full prompt start marker, so the
@@ -816,6 +820,7 @@ impl Painter {
             large_buffer: false,
             after_cursor_lines: None,
             exit_right_prompt: None,
+            exit_end_row: None,
             semantic_markers: None,
             prompt_marked: false,
             last_layout: None,
@@ -1822,6 +1827,16 @@ impl Painter {
             // What the exit path needs, as `repaint_buffer` records it.
             let after_cursor = lines.exit_after_cursor.unwrap_or(lines.after_cursor);
             self.after_cursor_lines = (!after_cursor.is_empty()).then(|| after_cursor.to_string());
+            // The last row with a cell of the buffer, or the cursor's when the
+            // buffer ends in an empty line, which has none.
+            let end_row = frame
+                .rows
+                .iter()
+                .rposition(|row| row.cells.iter().any(|cell| cell.index.is_some()))
+                .map_or(frame.cursor.1, |row| (row as u16).max(frame.cursor.1));
+            self.exit_end_row = end_row
+                .checked_sub(top)
+                .map(|row| anchor.saturating_add(row));
             self.exit_right_prompt = frame.right_prompt.and_then(|rp| {
                 let row = rp.row.checked_sub(top)?;
                 (row < visible).then(|| {
@@ -2744,7 +2759,45 @@ impl Painter {
                 .queue(ResetColor)?
                 .queue(RestorePosition)?;
         }
-        self.end_line()
+        self.stdout.queue(Print("\n"))?;
+        self.free_the_anchor_row()?;
+        self.stdout.flush()
+    }
+
+    /// On the way out of `read_line`, scroll the entry up until the cursor,
+    /// which is where the host prints next, is on the anchored row.
+    ///
+    /// The entry is output from here on, and the scroll that takes output off
+    /// the anchored row is otherwise the next prompt's first paint. That one
+    /// comes after the host ran the line and rendered a prompt, so the entry
+    /// sat on the anchored row for all that time and then jumped. Scrolled
+    /// here, it leaves in the write that ends it, and a line that prints
+    /// nothing brings the next prompt back with no scroll at all.
+    ///
+    /// Nothing to do under [`PromptAnchor::Bottom`]: the line break on the
+    /// last row has scrolled already.
+    ///
+    /// The cursor is moved relative to where it is, not to a row worked out
+    /// here. Should `exit_end_row` be off, the scroll is too, but the cursor
+    /// is still right below the entry.
+    fn free_the_anchor_row(&mut self) -> Result<()> {
+        let end_row = self.exit_end_row.take();
+        let (PromptAnchor::Row(row), Some(end_row)) = (self.prompt_anchor, end_row) else {
+            return Ok(());
+        };
+        let last_row = self.screen_height().saturating_sub(1);
+        // After the line break, which scrolled instead when the entry ended
+        // on the last row.
+        let cursor_row = end_row.saturating_add(1).min(last_row);
+        let scroll = cursor_row.saturating_sub(row.min(last_row));
+        if scroll > 0 {
+            self.stdout.queue(SavePosition)?;
+            self.queue_universal_scroll(scroll)?;
+            self.stdout
+                .queue(RestorePosition)?
+                .queue(cursor::MoveUp(scroll))?;
+        }
+        Ok(())
     }
 
     /// Commits `messages` to the screen above the prompt block, one row per

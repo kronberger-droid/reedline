@@ -1669,6 +1669,61 @@ fn the_next_prompt_is_on_the_anchor_again() {
     assert_eq!(session.screen.rows(), ["> a", "b", "c", "out", "> hi", ""]);
 }
 
+// The entry is output once it is submitted, so it leaves the anchored row in
+// the write that ends it, not when the next prompt is painted. The host then
+// prints from the anchored row down.
+#[rstest]
+#[case::one_row("hi", ["o2", "o3", "o4", "> hi", "", ""], 1)]
+#[case::two_rows("a\nb", ["o3", "o4", "> a", "b", "", ""], 2)]
+fn a_submitted_entry_leaves_the_anchored_row_at_once(
+    #[case] buffer: &str,
+    #[case] rows: [&str; 6],
+    #[case] scrolled: usize,
+) {
+    let mut session = Session::anchored(PromptAnchor::Row(4), 20, 6, &["o1", "o2", "o3", "o4"]);
+    let prompt = FixedPrompt::new("> ", "");
+    session.paint(&prompt, buffer, "");
+
+    session.leave();
+
+    assert_eq!(session.screen.rows(), rows);
+    assert_eq!(session.screen.cursor(), (0, 4));
+    assert_eq!(session.screen.scrolled(), scrolled);
+
+    // A line that printed nothing: the next prompt needs no scroll.
+    session.new_prompt(PromptAnchor::Row(4));
+    session.paint(&prompt, "x", "");
+    assert_eq!(session.screen.row(4), "> x");
+    assert_eq!(session.screen.row(3), rows[3]);
+    assert_eq!(session.screen.scrolled(), scrolled);
+}
+
+// Text after the cursor is reprinted on the way out, and the entry ends where
+// that text does, not on the cursor's row.
+#[test]
+fn a_submitted_entry_is_scrolled_by_its_rows_after_the_cursor_too() {
+    let mut session = Session::anchored(PromptAnchor::Row(3), 20, 6, &["o1", "o2", "o3"]);
+    session.paint(&FixedPrompt::new("> ", ""), "a", "\nb\nc");
+
+    session.leave();
+
+    assert_eq!(session.screen.rows(), ["> a", "b", "c", "", "", ""]);
+    assert_eq!(session.screen.cursor(), (0, 3));
+}
+
+// Under the bottom anchor the line break has scrolled the entry already.
+#[test]
+fn a_submitted_entry_under_the_bottom_anchor_scrolls_once() {
+    let mut session = Session::anchored(PromptAnchor::Bottom, 20, 6, &["o1"]);
+    session.paint(&FixedPrompt::new("> ", ""), "hi", "");
+
+    session.leave();
+
+    assert_eq!(session.screen.rows(), ["", "", "", "", "> hi", ""]);
+    assert_eq!(session.screen.cursor(), (0, 5));
+    assert_eq!(session.screen.scrolled(), 1);
+}
+
 // An external message is output: it goes right below what is there, into the
 // empty rows, and the block stays where it is until they are used up.
 #[test]

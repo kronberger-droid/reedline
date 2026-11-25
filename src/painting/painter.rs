@@ -527,52 +527,6 @@ pub(crate) struct PromptLayout {
     first_buffer_col: u16,
 }
 
-/// Where a new prompt starts on the screen.
-///
-/// Output printed while the host runs a command is never held to it: the
-/// anchor is applied once, when the next prompt is set up. Output that ended
-/// below the anchor is scrolled up until its last row sits right above it, and
-/// output that ended above it leaves the rows in between empty.
-///
-/// The prompt block still grows the way it always does, so a buffer or a menu
-/// too tall for the rows below the anchor scrolls the block up for as long as
-/// it is that tall.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PromptAnchor {
-    /// Right below whatever was printed last.
-    #[default]
-    Flow,
-    /// On this row, counted from the top starting at 0. A row past the end of
-    /// the screen is the last one.
-    Row(u16),
-    /// On the last row. A prompt of several rows ends there.
-    Bottom,
-}
-
-impl PromptAnchor {
-    /// Read an anchor from `top`, `bottom`, `flow` or a row number, `None`
-    /// for anything else.
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "flow" => Some(PromptAnchor::Flow),
-            "top" => Some(PromptAnchor::Row(0)),
-            "bottom" => Some(PromptAnchor::Bottom),
-            row => row.parse().ok().map(PromptAnchor::Row),
-        }
-    }
-
-    /// The row the prompt is held to on a screen of `screen_height` rows,
-    /// `None` when it goes wherever the output ended.
-    fn row(self, screen_height: u16) -> Option<u16> {
-        let last_row = screen_height.saturating_sub(1);
-        match self {
-            PromptAnchor::Flow => None,
-            PromptAnchor::Row(row) => Some(row.min(last_row)),
-            PromptAnchor::Bottom => Some(last_row),
-        }
-    }
-}
-
 /// Cached row where the prompt starts on screen, together with its
 /// freshness.
 ///
@@ -694,8 +648,6 @@ pub struct Painter {
     /// Present once the host asked for one: completers then say when they take the
     /// terminal, and the anchor is trusted otherwise.
     terminal_taken: Option<TerminalTakenSignal>,
-    /// The row every new prompt is moved to. See [`PromptAnchor`].
-    prompt_anchor: PromptAnchor,
     /// How many times the terminal was asked where the cursor is.
     #[cfg(test)]
     cursor_queries: usize,
@@ -775,7 +727,6 @@ impl Painter {
             frame_mode,
             last_frame: None,
             terminal_taken: None,
-            prompt_anchor: PromptAnchor::default(),
             #[cfg(test)]
             cursor_queries: 0,
         }
@@ -857,11 +808,6 @@ impl Painter {
     /// Sets the semantic prompt markers for terminal integration (OSC 133/633)
     pub fn set_semantic_markers(&mut self, markers: Option<Box<dyn SemanticPromptMarkers>>) {
         self.semantic_markers = markers;
-    }
-
-    /// Sets the row every new prompt starts on. See [`PromptAnchor`].
-    pub fn set_prompt_anchor(&mut self, anchor: PromptAnchor) {
-        self.prompt_anchor = anchor;
     }
 
     /// Returns a reference to the semantic prompt markers, if any
@@ -1276,11 +1222,6 @@ impl Painter {
         let prompt_selector = select_prompt_row(suspended_state, position);
         let new_row = match prompt_selector {
             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
-            PromptRowSelector::MakeNewPrompt { new_row }
-                if self.prompt_anchor != PromptAnchor::Flow =>
-            {
-                self.move_to_prompt_anchor(new_row)?
-            }
             PromptRowSelector::MakeNewPrompt { new_row } => {
                 // If we are on the last line and would move beyond the last line, we need to make
                 // room for the prompt.
@@ -1303,29 +1244,6 @@ impl Painter {
         // the no-measurement path returned above with a stale bottom-row fallback.
         self.prompt_start_row.mark_verified(new_row);
         Ok(())
-    }
-
-    /// Bring the first free row below the output, `free_row`, onto the row the
-    /// [`PromptAnchor`] names, and return the row the prompt starts on.
-    ///
-    /// `free_row` can be one past the last row, when the output ended on it
-    /// without a line break. The scroll counts that row like any other.
-    fn move_to_prompt_anchor(&mut self, free_row: u16) -> Result<u16> {
-        let Some(anchor_row) = self.prompt_anchor.row(self.screen_height()) else {
-            return Ok(free_row);
-        };
-        if free_row > anchor_row {
-            // The output reaches past the anchor: scroll it up until its last
-            // row is the one above. Newlines on the last row rather than a
-            // scroll sequence, so the rows leaving the top reach scrollback.
-            self.queue_universal_scroll(free_row - anchor_row)?;
-        } else if free_row < anchor_row {
-            // The rows in between stay empty. Normally they already are, but
-            // a command that moved the cursor up can leave text below it.
-            self.clear_from_anchor(free_row)?;
-        }
-        self.stdout.flush()?;
-        Ok(anchor_row)
     }
 
     /// Mark `prompt_start_row` as possibly out of sync — the next

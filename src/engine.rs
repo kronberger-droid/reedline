@@ -552,7 +552,18 @@ impl Reedline {
     pub fn create() -> Self {
         let history = Box::<FileBackedHistory>::default();
         #[cfg(not(test))]
-        let painter = Painter::new(W::terminal());
+        let painter = {
+            let mut painter = Painter::new(W::terminal());
+            // Prototype knob: lets a host that has no setting for it yet try
+            // the anchor. `with_prompt_anchor` overrides it.
+            if let Some(anchor) = std::env::var("REEDLINE_PROMPT_ANCHOR")
+                .ok()
+                .and_then(|value| PromptAnchor::parse(&value))
+            {
+                painter.set_prompt_anchor(anchor);
+            }
+            painter
+        };
         #[cfg(test)]
         let painter = Painter::new(W::sink());
         let buffer_highlighter = Box::<ExampleHighlighter>::default();

@@ -1001,6 +1001,18 @@ fn prompt_anchored_on_the_last_row(#[case] anchor: PromptAnchor) {
     assert_eq!(session.screen.scrolled(), 0);
 }
 
+#[rstest::rstest]
+#[case("top", Some(PromptAnchor::Row(0)))]
+#[case("bottom", Some(PromptAnchor::Bottom))]
+#[case("flow", Some(PromptAnchor::Flow))]
+#[case(" 12 ", Some(PromptAnchor::Row(12)))]
+#[case("-1", None)]
+#[case("middle", None)]
+#[case("", None)]
+fn prompt_anchor_parses_a_name_or_a_row(#[case] value: &str, #[case] anchor: Option<PromptAnchor>) {
+    assert_eq!(PromptAnchor::parse(value), anchor);
+}
+
 // A buffer taller than the rows below the anchor scrolls the block up, as it
 // does at the bottom of the screen without an anchor. The next prompt is back
 // on the anchor.

@@ -549,6 +549,17 @@ pub enum PromptAnchor {
 }
 
 impl PromptAnchor {
+    /// Read an anchor from `top`, `bottom`, `flow` or a row number, `None`
+    /// for anything else.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "flow" => Some(PromptAnchor::Flow),
+            "top" => Some(PromptAnchor::Row(0)),
+            "bottom" => Some(PromptAnchor::Bottom),
+            row => row.parse().ok().map(PromptAnchor::Row),
+        }
+    }
+
     /// The row the prompt is held to on a screen of `screen_height` rows,
     /// `None` when it goes wherever the output ended.
     fn row(self, screen_height: u16) -> Option<u16> {

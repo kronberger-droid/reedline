@@ -7,10 +7,20 @@
 //! A process that ignores SIGHUP, or never receives it, then runs forever.
 //!
 //! On unix reedline therefore does the waiting itself. It polls the tty next to
-//! a SIGWINCH self-pipe, reports `POLLHUP`/`POLLERR` as `UnexpectedEof`, and
-//! calls into crossterm only once poll says the tty is alive. The self-pipe
-//! wakes the wait on a resize, which crossterm learns about through its own
-//! signal pipe and reports on the zero-timeout poll that follows.
+//! a SIGWINCH self-pipe and calls into crossterm only once poll says the tty is
+//! alive, and then only for a short look. The self-pipe wakes the wait on a
+//! resize, which crossterm learns about through its own signal pipe and reports
+//! on the look that follows.
+//!
+//! A hangup fails the read with `UnexpectedEof` only if two things agree: poll
+//! reports `POLLHUP`/`POLLERR`, and the fd no longer answers as a terminal. A
+//! host is likely to exit on that error, so poll alone is not trusted with it.
+//! Where the two disagree the watch retires and crossterm waits as before.
+//!
+//! What this cannot close: a hangup that lands while crossterm is having its
+//! look. With `use-dev-tty` that costs the rest of the look. crossterm's default
+//! source never leaves its read loop, so there the spin is still possible, in
+//! a window of a millisecond per wakeup.
 //!
 //! Elsewhere, and on unix when the tty cannot be polled (macOS `poll` rejects
 //! some devices with `POLLNVAL`), these are crossterm's own functions.
@@ -55,18 +65,22 @@ mod unix {
             fd::{AsFd, OwnedFd},
             unix::net::UnixStream,
         },
-        sync::OnceLock,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            OnceLock,
+        },
         time::{Duration, Instant},
     };
 
     use crossterm::event;
     use rustix::event::{PollFd, PollFlags, Timespec};
 
-    /// Wakes after this many readable-but-no-event rounds hand over to crossterm
+    /// How many wakeups in a row may find the tty readable and crossterm
+    /// without an event, before crossterm does the waiting itself
     ///
-    /// Each round should drain the tty, so repeats mean crossterm reads some
-    /// other fd than the one watched here, and waiting would spin.
-    const MAX_IDLE_WAKEUPS: u32 = 3;
+    /// Each look should drain the tty, so repeats mean crossterm reads some
+    /// other fd than the one watched here, and waiting on this one would spin.
+    pub(super) const MAX_IDLE_WAKEUPS: u32 = 3;
 
     /// How long crossterm gets to look for an event once the wait has woken
     ///
@@ -74,18 +88,45 @@ mod unix {
     /// source, which nushell enables, has already read and parsed but not yet
     /// handed out, and it does not read the tty either. Any nonzero timeout
     /// gets past that, and an event that is ready returns at once.
-    const CROSSTERM_LOOK: Duration = Duration::from_millis(1);
+    pub(super) const CROSSTERM_LOOK: Duration = Duration::from_millis(1);
+
+    /// What poll's answer for the tty says about the terminal
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum Line {
+        Alive,
+        /// Poll reports a hangup and the fd is no terminal any more
+        Gone,
+        /// Poll reports a hangup on an fd that still answers as a terminal
+        Doubtful,
+    }
+
+    /// Judge `revents`, asking `still_a_tty` only about a reported hangup
+    pub(super) fn judge(revents: PollFlags, still_a_tty: impl FnOnce() -> bool) -> Line {
+        if !revents.intersects(PollFlags::HUP | PollFlags::ERR) {
+            Line::Alive
+        } else if still_a_tty() {
+            Line::Doubtful
+        } else {
+            Line::Gone
+        }
+    }
 
     pub(super) struct Watch {
         tty: OwnedFd,
         winch: UnixStream,
+        /// Cleared for good once poll called a hangup the tty does not confirm
+        trusted: AtomicBool,
     }
 
     static WATCH: OnceLock<Option<Watch>> = OnceLock::new();
 
-    /// The watch, set up on first use while the tty is still alive
+    /// The watch, set up on first use while the tty is still alive, and gone
+    /// again once it has retired
     pub(super) fn watch() -> Option<&'static Watch> {
-        WATCH.get_or_init(Watch::new).as_ref()
+        WATCH
+            .get_or_init(Watch::new)
+            .as_ref()
+            .filter(|watch| watch.trusted())
     }
 
     impl Watch {
@@ -122,29 +163,58 @@ mod unix {
             winch.set_nonblocking(true).ok()?;
             signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, notify).ok()?;
 
-            Some(Self { tty, winch })
+            Some(Self {
+                tty,
+                winch,
+                trusted: AtomicBool::new(true),
+            })
+        }
+
+        /// Whether poll's word on this tty still counts
+        pub(super) fn trusted(&self) -> bool {
+            self.trusted.load(Ordering::Relaxed)
         }
 
         pub(super) fn poll(&self, timeout: Duration) -> io::Result<bool> {
+            self.poll_with(timeout, event::poll)
+        }
+
+        /// [`Self::poll`], with `look` standing in for `crossterm::event::poll`
+        pub(super) fn poll_with(
+            &self,
+            timeout: Duration,
+            mut look: impl FnMut(Duration) -> io::Result<bool>,
+        ) -> io::Result<bool> {
             let deadline = Instant::now().checked_add(timeout);
+            // What is left of the timeout: `None` once it has run out,
+            // `Some(None)` for one that never does
+            let left = || match deadline {
+                Some(deadline) => deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|left| !left.is_zero())
+                    .map(Some),
+                None => Some(None),
+            };
+
             // Probe first, so crossterm is never entered on a dead tty
             self.wait(Some(Duration::ZERO))?;
             let mut idle_wakeups = 0;
             loop {
-                if event::poll(CROSSTERM_LOOK)? {
+                if !self.trusted() {
+                    // Retired: this poll, and every one after it, is crossterm's
+                    let rest = left().map_or(Duration::ZERO, |left| left.unwrap_or(Duration::MAX));
+                    return look(rest);
+                }
+                if look(CROSSTERM_LOOK)? {
                     return Ok(true);
                 }
-                let remaining = match deadline {
-                    Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
-                        Some(left) if !left.is_zero() => Some(left),
-                        _ => return Ok(false),
-                    },
-                    None => None,
+                let Some(remaining) = left() else {
+                    return Ok(false);
                 };
                 if self.wait(remaining)? {
                     idle_wakeups += 1;
                     if idle_wakeups >= MAX_IDLE_WAKEUPS {
-                        return event::poll(remaining.unwrap_or(Duration::MAX));
+                        return look(remaining.unwrap_or(Duration::MAX));
                     }
                 } else {
                     idle_wakeups = 0;
@@ -167,11 +237,20 @@ mod unix {
             }
 
             let tty = fds[0].revents();
-            if tty.intersects(PollFlags::HUP | PollFlags::ERR) {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "the terminal went away",
-                ));
+            match judge(tty, || rustix::termios::isatty(&self.tty)) {
+                Line::Alive => {}
+                Line::Gone => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the terminal went away",
+                    ));
+                }
+                Line::Doubtful => {
+                    // Poll would repeat this on every wait. Better to lose the
+                    // guard here than to end a session that is alive.
+                    self.trusted.store(false, Ordering::Relaxed);
+                    return Ok(false);
+                }
             }
             if !fds[1].revents().is_empty() {
                 let mut buf = [0u8; 64];
@@ -198,11 +277,12 @@ mod tests {
     };
 
     use rustix::{
+        event::PollFlags,
         fs::{Mode, OFlags},
         pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags},
     };
 
-    use super::unix::Watch;
+    use super::unix::{judge, Line, Watch, CROSSTERM_LOOK, MAX_IDLE_WAKEUPS};
 
     /// A pty pair: the master, played by the terminal, and the watched slave
     fn pty() -> (std::fs::File, Watch) {
@@ -255,6 +335,7 @@ mod tests {
         drop(master);
         let err = watch.wait(Some(Duration::ZERO)).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert!(watch.trusted(), "a confirmed hangup is no reason to retire");
     }
 
     #[test]
@@ -283,5 +364,92 @@ mod tests {
             "woke on the timeout"
         );
         raiser.join().unwrap();
+    }
+
+    #[test]
+    fn a_hangup_counts_only_once_the_fd_is_no_terminal() {
+        let hangups = [
+            PollFlags::HUP,
+            PollFlags::ERR,
+            PollFlags::IN | PollFlags::HUP,
+        ];
+        for revents in hangups {
+            assert_eq!(judge(revents, || false), Line::Gone, "{revents:?}");
+            assert_eq!(judge(revents, || true), Line::Doubtful, "{revents:?}");
+        }
+        for revents in [PollFlags::empty(), PollFlags::IN] {
+            let alive = judge(revents, || panic!("asked about a tty poll calls alive"));
+            assert_eq!(alive, Line::Alive, "{revents:?}");
+        }
+    }
+
+    #[test]
+    fn a_dead_tty_fails_the_poll_before_crossterm_is_asked() {
+        let (master, watch) = pty();
+        drop(master);
+        let err = watch
+            .poll_with(Duration::from_secs(5), |_| {
+                panic!("crossterm was asked about a dead tty")
+            })
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_ready_event_ends_the_poll_on_the_first_look() {
+        let (_master, watch) = pty();
+        let mut looks = Vec::new();
+        let ready = watch.poll_with(Duration::from_secs(5), |timeout| {
+            looks.push(timeout);
+            Ok(true)
+        });
+        assert!(ready.unwrap());
+        assert_eq!(looks, [CROSSTERM_LOOK]);
+    }
+
+    #[test]
+    fn an_idle_poll_runs_out_its_timeout() {
+        let (_master, watch) = pty();
+        let timeout = Duration::from_millis(50);
+        let start = Instant::now();
+        let mut looks = Vec::new();
+        let ready = watch.poll_with(timeout, |look| {
+            looks.push(look);
+            Ok(false)
+        });
+        assert!(!ready.unwrap());
+        assert!(start.elapsed() >= timeout, "returned early");
+        assert!(start.elapsed() < Duration::from_secs(2), "overslept");
+        assert!(
+            looks.iter().all(|look| *look == CROSSTERM_LOOK),
+            "an idle tty is never handed over: {looks:?}"
+        );
+    }
+
+    #[test]
+    fn input_crossterm_never_takes_is_handed_over() {
+        let (mut master, watch) = pty();
+        // Nothing reads this byte, so every wait finds the tty readable
+        master.write_all(b"x").unwrap();
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        let mut looks = Vec::new();
+        let ready = watch.poll_with(timeout, |look| {
+            looks.push(look);
+            Ok(false)
+        });
+        assert!(!ready.unwrap());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "spun on the timeout"
+        );
+
+        let (handed_over, short_looks) = looks.split_last().unwrap();
+        assert!(
+            *handed_over > Duration::from_secs(20),
+            "crossterm gets the rest of the timeout: {handed_over:?}"
+        );
+        assert!(short_looks.len() >= MAX_IDLE_WAKEUPS as usize);
+        assert!(short_looks.iter().all(|look| *look == CROSSTERM_LOOK));
     }
 }

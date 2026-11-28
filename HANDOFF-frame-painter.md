@@ -3,8 +3,10 @@
 Working notes for `feat/frame-painter-v2`. Drop this file before the PR
 merges.
 
-State as of 2026-11-22, rebased onto `upstream/main` (`452867e`, with the
-terminal-taken signal from #1297).
+State as of 2026-11-28, rebased onto `upstream/main` (`5004447`, with the
+line breaks turned into `\r\n` in the writer from #1340). The buffer and
+hint reach the layout as plain `&str` since then, and the frame needs no
+`\r` of its own: it moves the cursor to each row.
 
 ## Decision: replace, not flag
 
@@ -64,7 +66,9 @@ wrong gets fixed: a streaming painter bug goes to `main` as its own PR, so
 ## Where the streaming painter is wrong
 
 All three on a buffer taller than the screen, found with the resize tests.
-The frame is right in each, so tall-buffer tests assert on the frame alone.
+The frame is right in each. The first is fixed upstream, so a tall-buffer
+test can compare the two painters again as long as it stays clear of the
+other two.
 
 - **An empty indicator scrolls a row out on every paint.** `compute_layout`
   counts `prompt_indicator.lines()`, which is 0 for `""`, so `extra_rows`
@@ -79,9 +83,8 @@ The frame is right in each, so tall-buffer tests assert on the frame alone.
   the trailing empty line: the screen shows `2 3 4` with the cursor on the
   `4` row, where the frame shows `3 4` and the cursor on the empty row.
 
-The first is fixed on `fix/large-buffer-empty-indicator` (one commit on
-`upstream/main`, not pushed), to go to `main` as its own PR. The other two
-go deeper into `print_large_buffer` and are left to the frame.
+The first is fixed on `main` since #1338. The other two go deeper into
+`print_large_buffer` and are left to the frame.
 
 ## Settled along the way
 
@@ -206,6 +209,6 @@ could not see it. Before the semantic markers region (Next, step 4):
 
 ## Not pushed
 
-The fork holds the rebase onto `452867e` up to `9077398`. Everything after
-it is local, and a plain push is enough:
-`git push origin feat/frame-painter-v2`.
+The fork holds the branch on its old base, `452867e`, up to `b3e321b`. The
+rebase onto `5004447` rewrote those commits:
+`git push --force-with-lease origin feat/frame-painter-v2`.

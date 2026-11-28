@@ -1061,20 +1061,19 @@ fn after_a_resize_the_frame_draws_over_the_block_the_terminal_reflowed(
 /// A shrink can leave the top of the block in scrollback. The frame then
 /// shows its bottom from the top row, as it does without a resize, and
 /// scrolls nothing more out.
-///
-/// Not compared with the streaming painter, which scrolls a row out on each
-/// paint of a buffer taller than the screen under an empty indicator.
 #[test]
 fn after_a_resize_a_frame_taller_than_the_screen_scrolls_nothing() {
-    let mut session = Session::new(10, 3, 0);
-    session.host_output(b"out\r\n> 1\r\n2\r\n3\r\n4\r\n5");
+    let prompt = FixedPrompt::new("> ", "");
 
-    session.painter.handle_resize(10, 3);
-    session.paint(&FixedPrompt::new("> ", ""), "1\n2\n3\n4\n5", "");
+    let [streaming, frame] = both_painters(&[], (10, 3), &|s| {
+        s.host_output(b"out\r\n> 1\r\n2\r\n3\r\n4\r\n5");
+        s.painter.handle_resize(10, 3);
+        s.paint(&prompt, "1\n2\n3\n4\n5", "");
+    });
 
-    assert_eq!(session.screen.rows(), ["3", "4", "5"]);
-    assert_eq!(session.screen.cursor(), (1, 2));
-    assert_eq!(session.history(), ["out", "> 1", "2", "3", "4", "5"]);
+    assert_eq!(frame, streaming);
+    assert_eq!(frame.0, ["out", "> 1", "2", "3", "4", "5"]);
+    assert_eq!(frame.1, (1, 2));
 }
 
 /// `A` starts a fresh line, so it goes out once per prompt: through ConPTY it

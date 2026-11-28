@@ -1326,8 +1326,13 @@ impl Reedline {
 
         self.bracketed_paste.exit();
         self.kitty_protocol.exit();
-        terminal::disable_raw_mode()?;
-        result
+        // The read's own error is the one to report. On a terminal that went
+        // away the mode cannot be put back either, and that failure would
+        // replace the reason.
+        let restored = terminal::disable_raw_mode();
+        let signal = result?;
+        restored?;
+        Ok(signal)
     }
 
     /// Returns the current insertion point of the input buffer.
